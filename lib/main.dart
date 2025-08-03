@@ -8,7 +8,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(MyApp());
 }
 
@@ -16,24 +17,21 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Mi Música Pro',
+      title: 'Fabichelo',
       theme: ThemeData(
-        primarySwatch: Colors.indigo,
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: Color(0xFF0D1117),
         appBarTheme: AppBarTheme(
-          backgroundColor: Colors.indigo,
+          backgroundColor: Color(0xFF161B22),
           foregroundColor: Colors.white,
-          elevation: 4,
+          elevation: 0,
         ),
-        elevatedButtonTheme: ElevatedButtonThemeData(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.indigo,
-            foregroundColor: Colors.white,
-            elevation: 3,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(10),
-            ),
-          ),
+        bottomNavigationBarTheme: BottomNavigationBarThemeData(
+          backgroundColor: Color(0xFF161B22),
+          selectedItemColor: Colors.green,
+          unselectedItemColor: Colors.grey,
         ),
+        cardColor: Color(0xFF21262D),
       ),
       home: MainPage(),
       debugShowCheckedModeBanner: false,
@@ -49,67 +47,10 @@ class MainPage extends StatefulWidget {
 class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
   int _currentIndex = 0;
   late TabController _tabController;
-
-  @override
-  void initState() {
-    super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-  }
-
-  @override
-  void dispose() {
-    _tabController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: TabBarView(
-        controller: _tabController,
-        children: [
-          MusicPage(),
-          TtsPage(),
-        ],
-      ),
-      bottomNavigationBar: Container(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black12,
-              blurRadius: 4,
-              offset: Offset(0, -2),
-            ),
-          ],
-        ),
-        child: TabBar(
-          controller: _tabController,
-          tabs: [
-            Tab(icon: Icon(Icons.music_note), text: 'Música'),
-            Tab(icon: Icon(Icons.record_voice_over), text: 'Texto a Voz'),
-          ],
-          labelColor: Colors.indigo,
-          unselectedLabelColor: Colors.grey,
-          indicatorColor: Colors.indigo,
-        ),
-      ),
-    );
-  }
-}
-
-class MusicPage extends StatefulWidget {
-  @override
-  _MusicPageState createState() => _MusicPageState();
-}
-
-class _MusicPageState extends State<MusicPage> {
-  final TextEditingController _urlController = TextEditingController();
   final AudioPlayer _audioPlayer = AudioPlayer();
   List<File> _songs = [];
-  bool _isDownloading = false;
-  bool _isPlaying = false;
   File? _currentSong;
+  bool _isPlaying = false;
   Duration _duration = Duration.zero;
   Duration _position = Duration.zero;
   double _volume = 1.0;
@@ -120,6 +61,7 @@ class _MusicPageState extends State<MusicPage> {
   @override
   void initState() {
     super.initState();
+    _tabController = TabController(length: 2, vsync: this);
     _requestPermissions();
     _loadSongs();
     _setupAudioPlayer();
@@ -129,26 +71,21 @@ class _MusicPageState extends State<MusicPage> {
     await [
       Permission.storage,
       Permission.manageExternalStorage,
+      Permission.notification,
     ].request();
   }
 
   void _setupAudioPlayer() {
     _positionSubscription = _audioPlayer.positionStream.listen((position) {
-      if (mounted) {
-        setState(() => _position = position);
-      }
+      if (mounted) setState(() => _position = position);
     });
 
     _durationSubscription = _audioPlayer.durationStream.listen((duration) {
-      if (mounted) {
-        setState(() => _duration = duration ?? Duration.zero);
-      }
+      if (mounted) setState(() => _duration = duration ?? Duration.zero);
     });
 
     _playingSubscription = _audioPlayer.playingStream.listen((playing) {
-      if (mounted) {
-        setState(() => _isPlaying = playing);
-      }
+      if (mounted) setState(() => _isPlaying = playing);
     });
 
     _audioPlayer.playerStateStream.listen((state) {
@@ -159,12 +96,24 @@ class _MusicPageState extends State<MusicPage> {
   }
 
   Future<Directory> _getMusicDirectory() async {
-    final directory = await getApplicationDocumentsDirectory();
-    final musicDir = Directory('${directory.path}/musica');
-    if (!await musicDir.exists()) {
-      await musicDir.create(recursive: true);
+    Directory? directory;
+    if (Platform.isAndroid) {
+      directory = Directory('/storage/emulated/0/Download/Fabichelo');
+    } else {
+      final appDir = await getApplicationDocumentsDirectory();
+      directory = Directory('${appDir.path}/Fabichelo');
     }
-    return musicDir;
+
+    if (!await directory.exists()) {
+      await directory.create(recursive: true);
+    }
+
+    final nomediaFile = File('${directory.path}/.nomedia');
+    if (!await nomediaFile.exists()) {
+      await nomediaFile.create();
+    }
+
+    return directory;
   }
 
   Future<void> _loadSongs() async {
@@ -172,69 +121,18 @@ class _MusicPageState extends State<MusicPage> {
       final musicDir = await _getMusicDirectory();
       final files = musicDir
           .listSync()
-          .where((file) => 
+          .where((file) =>
               file.path.endsWith('.mp3') ||
               file.path.endsWith('.webm') ||
               file.path.endsWith('.m4a') ||
               file.path.endsWith('.wav'))
           .map((file) => File(file.path))
           .toList();
-      
-      if (mounted) {
-        setState(() => _songs = files);
-      }
+      if (mounted) setState(() => _songs = files);
     } catch (e) {
       _showMessage('Error cargando canciones: $e');
     }
   }
-
-  bool _isValidYouTubeUrl(String url) {
-    final regex = RegExp(r'(https?\:\/\/)?(www\.)?(youtube\.com|youtu\.?be)\/.+');
-    return regex.hasMatch(url);
-  }
-
-  Future<void> _downloadSong() async {
-    final url = _urlController.text.trim();
-    if (!_isValidYouTubeUrl(url)) {
-      _showMessage('URL de YouTube no válida');
-      return;
-    }
-
-    setState(() => _isDownloading = true);
-
-    try {
-      final response = await http.post(
-        Uri.parse('https://servermusica-1.onrender.com/download'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'url': url}),
-      ).timeout(Duration(minutes: 5));
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final filename = data['file'];
-        final downloadUrl = 'https://servermusica-1.onrender.com/downloads/$filename';
-        
-        final audioResponse = await http.get(Uri.parse(downloadUrl));
-        final musicDir = await _getMusicDirectory();
-        final file = File('${musicDir.path}/$filename');
-        
-        await file.writeAsBytes(audioResponse.bodyBytes);
-        _showMessage('Descargado: $filename');
-        _urlController.clear();
-        await _loadSongs();
-      } else {
-        final error = jsonDecode(response.body)['error'] ?? 'Error desconocido';
-        _showMessage('Error: $error');
-      }
-    } catch (e) {
-      _showMessage('Error de descarga: $e');
-    } finally {
-      if (mounted) {
-        setState(() => _isDownloading = false);
-      }
-    }
-  }
-
   Future<void> _playSong(File song) async {
     try {
       if (_currentSong == song && _isPlaying) {
@@ -257,16 +155,6 @@ class _MusicPageState extends State<MusicPage> {
     }
   }
 
-  Future<void> _stop() async {
-    await _audioPlayer.stop();
-    if (mounted) {
-      setState(() {
-        _currentSong = null;
-        _position = Duration.zero;
-      });
-    }
-  }
-
   Future<void> _playNext() async {
     if (_currentSong != null && _songs.isNotEmpty) {
       final currentIndex = _songs.indexOf(_currentSong!);
@@ -283,21 +171,12 @@ class _MusicPageState extends State<MusicPage> {
     }
   }
 
-  void _seekTo(double seconds) {
-    _audioPlayer.seek(Duration(seconds: seconds.toInt()));
-  }
-
-  void _setVolume(double volume) {
-    setState(() => _volume = volume);
-    _audioPlayer.setVolume(volume);
-  }
-
   void _showMessage(String message) {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(message),
-          backgroundColor: Colors.indigo,
+          backgroundColor: Colors.green,
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -311,22 +190,18 @@ class _MusicPageState extends State<MusicPage> {
     return '$minutes:$seconds';
   }
 
-  Future<void> _deleteSong(File song) async {
-    try {
-      if (_currentSong == song) {
-        await _stop();
-      }
-      await song.delete();
-      await _loadSongs();
-      _showMessage('Canción eliminada');
-    } catch (e) {
-      _showMessage('Error eliminando canción: $e');
-    }
+  void _seekTo(double seconds) {
+    _audioPlayer.seek(Duration(seconds: seconds.toInt()));
+  }
+
+  void _setVolume(double volume) {
+    setState(() => _volume = volume);
+    _audioPlayer.setVolume(volume);
   }
 
   @override
   void dispose() {
-    _urlController.dispose();
+    _tabController.dispose();
     _audioPlayer.dispose();
     _positionSubscription?.cancel();
     _durationSubscription?.cancel();
@@ -337,588 +212,380 @@ class _MusicPageState extends State<MusicPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text('Mi Música Pro'),
-        centerTitle: true,
-      ),
       body: Column(
         children: [
-          // Download Section
-          Container(
-            padding: EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.grey[50],
-              border: Border(
-                bottom: BorderSide(color: Colors.grey[300]!),
-              ),
-            ),
-            child: Column(
+          Expanded(
+            child: TabBarView(
+              controller: _tabController,
               children: [
-                TextField(
-                  controller: _urlController,
-                  decoration: InputDecoration(
-                    labelText: 'Pega el link de YouTube',
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    prefixIcon: Icon(Icons.link),
-                  ),
-                ),
-                SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: _isDownloading ? null : _downloadSong,
-                    icon: _isDownloading
-                        ? SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
-                          )
-                        : Icon(Icons.download),
-                    label: Text(_isDownloading ? 'Descargando...' : 'Descargar música'),
-                  ),
-                ),
+                _buildMusicPage(),
+                _buildTtsPage(),
               ],
             ),
           ),
-
-          // Current Song Player
-          if (_currentSong != null)
-            Container(
-              padding: EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.indigo[50],
-                border: Border(
-                  bottom: BorderSide(color: Colors.grey[300]!),
+          if (_currentSong != null) _buildFullPlayer(),
+          Container(
+            decoration: BoxDecoration(
+              color: Color(0xFF161B22),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black26,
+                  blurRadius: 8,
+                  offset: Offset(0, -2),
                 ),
-              ),
-              child: Column(
-                children: [
-                  Text(
-                    _currentSong!.path.split('/').last,
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                  SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Text(_formatDuration(_position)),
-                      Expanded(
-                        child: Slider(
-                          value: _position.inSeconds.toDouble(),
-                          max: _duration.inSeconds.toDouble(),
-                          onChanged: _seekTo,
-                          activeColor: Colors.indigo,
-                        ),
-                      ),
-                      Text(_formatDuration(_duration)),
-                    ],
-                  ),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      IconButton(
-                        onPressed: _playPrevious,
-                        icon: Icon(Icons.skip_previous, size: 30),
-                        color: Colors.indigo,
-                      ),
-                      IconButton(
-                        onPressed: _pauseResume,
-                        icon: Icon(
-                          _isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
-                          size: 50,
-                        ),
-                        color: Colors.indigo,
-                      ),
-                      IconButton(
-                        onPressed: _playNext,
-                        icon: Icon(Icons.skip_next, size: 30),
-                        color: Colors.indigo,
-                      ),
-                      IconButton(
-                        onPressed: _stop,
-                        icon: Icon(Icons.stop, size: 30),
-                        color: Colors.red,
-                      ),
-                    ],
-                  ),
-                  Row(
-                    children: [
-                      Icon(Icons.volume_down),
-                      Expanded(
-                        child: Slider(
-                          value: _volume,
-                          onChanged: _setVolume,
-                          activeColor: Colors.indigo,
-                        ),
-                      ),
-                      Icon(Icons.volume_up),
-                    ],
-                  ),
-                ],
-              ),
+              ],
             ),
-
-          // Songs List
-          Expanded(
-            child: _songs.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.music_off, size: 64, color: Colors.grey),
-                        SizedBox(height: 16),
-                        Text(
-                          'No hay canciones aún',
-                          style: TextStyle(fontSize: 18, color: Colors.grey),
-                        ),
-                      ],
-                    ),
-                  )
-                : ListView.builder(
-                    itemCount: _songs.length,
-                    itemBuilder: (context, index) {
-                      final song = _songs[index];
-                      final isCurrentSong = _currentSong == song;
-                      
-                      return Container(
-                        margin: EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: isCurrentSong ? Colors.indigo[50] : null,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: ListTile(
-                          leading: Container(
-                            padding: EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: isCurrentSong ? Colors.indigo : Colors.grey[300],
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Icon(
-                              isCurrentSong && _isPlaying ? Icons.music_note : Icons.music_note_outlined,
-                              color: isCurrentSong ? Colors.white : Colors.grey[600],
-                            ),
-                          ),
-                          title: Text(
-                            song.path.split('/').last,
-                            style: TextStyle(
-                              fontWeight: isCurrentSong ? FontWeight.bold : FontWeight.normal,
-                              color: isCurrentSong ? Colors.indigo : null,
-                            ),
-                          ),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                onPressed: () => _playSong(song),
-                                icon: Icon(
-                                  isCurrentSong && _isPlaying ? Icons.pause : Icons.play_arrow,
-                                  color: Colors.indigo,
-                                ),
-                              ),
-                              PopupMenuButton(
-                                itemBuilder: (context) => [
-                                  PopupMenuItem(
-                                    value: 'delete',
-                                    child: Row(
-                                      children: [
-                                        Icon(Icons.delete, color: Colors.red),
-                                        SizedBox(width: 8),
-                                        Text('Eliminar'),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                                onSelected: (value) {
-                                  if (value == 'delete') {
-                                    showDialog(
-                                      context: context,
-                                      builder: (context) => AlertDialog(
-                                        title: Text('Eliminar canción'),
-                                        content: Text('¿Estás seguro de que quieres eliminar esta canción?'),
-                                        actions: [
-                                          TextButton(
-                                            onPressed: () => Navigator.pop(context),
-                                            child: Text('Cancelar'),
-                                          ),
-                                          TextButton(
-                                            onPressed: () {
-                                              Navigator.pop(context);
-                                              _deleteSong(song);
-                                            },
-                                            child: Text('Eliminar', style: TextStyle(color: Colors.red)),
-                                          ),
-                                        ],
-                                      ),
-                                    );
-                                  }
-                                },
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
-                  ),
+            child: TabBar(
+              controller: _tabController,
+              tabs: [
+                Tab(icon: Icon(Icons.music_note), text: 'Música'),
+                Tab(icon: Icon(Icons.record_voice_over), text: 'TTS'),
+              ],
+              labelColor: Colors.green,
+              unselectedLabelColor: Colors.grey,
+              indicatorColor: Colors.green,
+            ),
           ),
         ],
       ),
     );
   }
-}
-
-class TtsPage extends StatefulWidget {
-  @override
-  _TtsPageState createState() => _TtsPageState();
-}
-
-class _TtsPageState extends State<TtsPage> {
-  final FlutterTts _flutterTts = FlutterTts();
-  final TextEditingController _textController = TextEditingController();
-  double _speechRate = 0.5;
-  double _pitch = 1.0;
-  double _volume = 1.0;
-  bool _isSpeaking = false;
-  List<String> _languages = [];
-  String _selectedLanguage = "es-ES";
-
-  @override
-  void initState() {
-    super.initState();
-    _initTts();
-  }
-
-  Future<void> _initTts() async {
-    await _flutterTts.setLanguage(_selectedLanguage);
-    await _flutterTts.setSpeechRate(_speechRate);
-    await _flutterTts.setPitch(_pitch);
-    await _flutterTts.setVolume(_volume);
-
-    _flutterTts.setStartHandler(() {
-      if (mounted) {
-        setState(() => _isSpeaking = true);
-      }
-    });
-
-    _flutterTts.setCompletionHandler(() {
-      if (mounted) {
-        setState(() => _isSpeaking = false);
-      }
-    });
-
-    _flutterTts.setErrorHandler((msg) {
-      if (mounted) {
-        setState(() => _isSpeaking = false);
-        _showMessage('Error: $msg');
-      }
-    });
-
-    // Obtener idiomas disponibles
-    final languages = await _flutterTts.getLanguages;
-    if (languages != null && mounted) {
-      setState(() {
-        _languages = List<String>.from(languages);
-      });
-    }
-  }
-
-  Future<void> _speak() async {
-    final text = _textController.text.trim();
-    if (text.isEmpty) {
-      _showMessage('Ingresa texto para leer');
-      return;
-    }
-
-    if (_isSpeaking) {
-      await _flutterTts.stop();
-    } else {
-      await _flutterTts.setLanguage(_selectedLanguage);
-      await _flutterTts.setSpeechRate(_speechRate);
-      await _flutterTts.setPitch(_pitch);
-      await _flutterTts.setVolume(_volume);
-      await _flutterTts.speak(text);
-    }
-  }
-
-  Future<void> _stop() async {
-    await _flutterTts.stop();
-    if (mounted) {
-      setState(() => _isSpeaking = false);
-    }
-  }
-
-  void _showMessage(String message) {
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(message),
-          backgroundColor: Colors.deepPurple,
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
-  }
-
-  @override
-  void dispose() {
-    _flutterTts.stop();
-    _textController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Texto a Voz'),
-        centerTitle: true,
-        backgroundColor: Colors.deepPurple,
+  Widget _buildFullPlayer() {
+    return Container(
+      height: 90,
+      decoration: BoxDecoration(
+        color: Color(0xFF161B22),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black26,
+            blurRadius: 8,
+            offset: Offset(0, -2),
+          ),
+        ],
       ),
-      body: SingleChildScrollView(
-        padding: EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Text Input
-            Card(
-              elevation: 4,
-              child: Padding(
-                padding: EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Texto a leer:',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.deepPurple,
-                      ),
-                    ),
-                    SizedBox(height: 8),
-                    TextField(
-                      controller: _textController,
-                      maxLines: 5,
-                      decoration: InputDecoration(
-                        hintText: 'Escribe aquí el texto que quieres que lea...',
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(10),
-                          borderSide: BorderSide(color: Colors.deepPurple),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+      child: Column(
+        children: [
+          Container(
+            height: 2,
+            child: LinearProgressIndicator(
+              value: _duration.inSeconds > 0
+                  ? _position.inSeconds / _duration.inSeconds
+                  : 0.0,
+              backgroundColor: Colors.grey[800],
+              valueColor: AlwaysStoppedAnimation<Color>(Colors.green),
             ),
-
-            SizedBox(height: 16),
-
-            // Language Selection
-            if (_languages.isNotEmpty)
-              Card(
-                elevation: 4,
-                child: Padding(
-                  padding: EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+          ),
+          Expanded(
+            child: Row(
+              children: [
+                Container(
+                  width: 60,
+                  height: 60,
+                  margin: EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: Colors.green,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Icon(Icons.music_note, color: Colors.white, size: 24),
+                ),
+                Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(vertical: 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _currentSong!.path.split('/').last.replaceAll('.mp3', '').replaceAll('.webm', ''),
+                          style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        SizedBox(height: 2),
+                        Text(
+                          '${_formatDuration(_position)} / ${_formatDuration(_duration)}',
+                          style: TextStyle(color: Colors.grey, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                IconButton(
+                  onPressed: _playPrevious,
+                  icon: Icon(Icons.skip_previous, color: Colors.white),
+                ),
+                Container(
+                  decoration: BoxDecoration(
+                    color: Colors.green,
+                    shape: BoxShape.circle,
+                  ),
+                  child: IconButton(
+                    onPressed: _pauseResume,
+                    icon: Icon(
+                      _isPlaying ? Icons.pause : Icons.play_arrow,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  onPressed: _playNext,
+                  icon: Icon(Icons.skip_next, color: Colors.white),
+                ),
+                Container(
+                  width: 80,
+                  child: Row(
                     children: [
-                      Text(
-                        'Idioma:',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.deepPurple,
+                      Icon(Icons.volume_down, color: Colors.grey, size: 16),
+                      Expanded(
+                        child: Slider(
+                          value: _volume,
+                          onChanged: _setVolume,
+                          activeColor: Colors.green,
+                          inactiveColor: Colors.grey[700],
                         ),
-                      ),
-                      SizedBox(height: 8),
-                      DropdownButtonFormField<String>(
-                        value: _selectedLanguage,
-                        decoration: InputDecoration(
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                        ),
-                        items: _languages.map((language) {
-                          return DropdownMenuItem(
-                            value: language,
-                            child: Text(language),
-                          );
-                        }).toList(),
-                        onChanged: (value) {
-                          if (value != null) {
-                            setState(() => _selectedLanguage = value);
-                          }
-                        },
                       ),
                     ],
                   ),
                 ),
-              ),
-
-            SizedBox(height: 16),
-
-            // Controls
-            Card(
-              elevation: 4,
-              child: Padding(
-                padding: EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Configuración:',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.deepPurple,
-                      ),
-                    ),
-                    SizedBox(height: 16),
-
-                    // Speech Rate
-                    Row(
-                      children: [
-                        Icon(Icons.speed, color: Colors.deepPurple),
-                        SizedBox(width: 8),
-                        Text('Velocidad:'),
-                        Expanded(
-                          child: Slider(
-                            value: _speechRate,
-                            min: 0.1,
-                            max: 1.0,
-                            divisions: 9,
-                            label: _speechRate.toStringAsFixed(1),
-                            activeColor: Colors.deepPurple,
-                            onChanged: (value) => setState(() => _speechRate = value),
-                          ),
-                        ),
-                        Text(_speechRate.toStringAsFixed(1)),
-                      ],
-                    ),
-
-                    // Pitch
-                    Row(
-                      children: [
-                        Icon(Icons.graphic_eq, color: Colors.deepPurple),
-                        SizedBox(width: 8),
-                        Text('Tono:'),
-                        Expanded(
-                          child: Slider(
-                            value: _pitch,
-                            min: 0.5,
-                            max: 2.0,
-                            divisions: 15,
-                            label: _pitch.toStringAsFixed(1),
-                            activeColor: Colors.deepPurple,
-                            onChanged: (value) => setState(() => _pitch = value),
-                          ),
-                        ),
-                        Text(_pitch.toStringAsFixed(1)),
-                      ],
-                    ),
-
-                    // Volume
-                    Row(
-                      children: [
-                        Icon(Icons.volume_up, color: Colors.deepPurple),
-                        SizedBox(width: 8),
-                        Text('Volumen:'),
-                        Expanded(
-                          child: Slider(
-                            value: _volume,
-                            min: 0.0,
-                            max: 1.0,
-                            divisions: 10,
-                            label: _volume.toStringAsFixed(1),
-                            activeColor: Colors.deepPurple,
-                            onChanged: (value) => setState(() => _volume = value),
-                          ),
-                        ),
-                        Text(_volume.toStringAsFixed(1)),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            SizedBox(height: 24),
-
-            // Action Buttons
-            Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _speak,
-                    icon: Icon(_isSpeaking ? Icons.stop : Icons.play_arrow),
-                    label: Text(_isSpeaking ? 'Detener' : 'Reproducir'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.deepPurple,
-                      foregroundColor: Colors.white,
-                      padding: EdgeInsets.symmetric(vertical: 12),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
-                  ),
-                ),
-                if (_isSpeaking) ...[
-                  SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: _stop,
-                      icon: Icon(Icons.stop),
-                      label: Text('Parar'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red,
-                        foregroundColor: Colors.white,
-                        padding: EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
+                SizedBox(width: 8),
               ],
             ),
-
-            SizedBox(height: 16),
-
-            // Clear Text Button
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: () {
-                  _textController.clear();
-                  _stop();
-                },
-                icon: Icon(Icons.clear),
-                label: Text('Limpiar texto'),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: Colors.deepPurple,
-                  side: BorderSide(color: Colors.deepPurple),
-                  padding: EdgeInsets.symmetric(vertical: 12),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
+  Widget _buildMusicPage() {
+    final TextEditingController urlController = TextEditingController();
+    bool isDownloading = false;
+
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      appBar: AppBar(
+        title: Text('Fabichelo Musica'),
+        centerTitle: true,
+        actions: [
+          IconButton(
+            icon: Icon(Icons.folder),
+            onPressed: () async {
+              final dir = await _getMusicDirectory();
+              _showMessage('Ruta: ${dir.path}');
+            },
+          ),
+        ],
+      ),
+      body: StatefulBuilder(
+        builder: (context, setState) {
+          return Column(
+            children: [
+              Padding(
+                padding: EdgeInsets.all(16),
+                child: Card(
+                  child: Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        TextField(
+                          controller: urlController,
+                          style: TextStyle(color: Colors.white),
+                          decoration: InputDecoration(
+                            labelText: 'Pega el link de YouTube',
+                            labelStyle: TextStyle(color: Colors.grey),
+                            prefixIcon: Icon(Icons.link, color: Colors.grey),
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: BorderSide(color: Colors.grey),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: BorderSide(color: Colors.green),
+                            ),
+                          ),
+                        ),
+                        SizedBox(height: 12),
+                        ElevatedButton.icon(
+                          onPressed: isDownloading ? null : () async {
+                            final url = urlController.text.trim();
+                            if (!url.contains('youtube.com') && !url.contains('youtu.be')) {
+                              _showMessage('URL no válida');
+                              return;
+                            }
+
+                            setState(() => isDownloading = true);
+
+                            try {
+                              final response = await http.post(
+                                Uri.parse('https://servermusica-1.onrender.com/download'),
+                                headers: {'Content-Type': 'application/json'},
+                                body: jsonEncode({'url': url}),
+                              ).timeout(Duration(minutes: 5));
+
+                              if (response.statusCode == 200) {
+                                final data = jsonDecode(response.body);
+                                final filename = data['file'];
+                                final downloadUrl = 'https://servermusica-1.onrender.com/downloads/$filename';
+
+                                final audioResponse = await http.get(Uri.parse(downloadUrl));
+                                final dir = await _getMusicDirectory();
+                                final file = File('${dir.path}/$filename');
+                                await file.writeAsBytes(audioResponse.bodyBytes);
+
+                                _showMessage('Descargado: $filename');
+                                urlController.clear();
+                                await _loadSongs();
+                              } else {
+                                final error = jsonDecode(response.body)['error'] ?? 'Error desconocido';
+                                _showMessage('Error: $error');
+                              }
+                            } catch (e) {
+                              _showMessage('Error: $e');
+                            } finally {
+                              setState(() => isDownloading = false);
+                            }
+                          },
+                          icon: isDownloading
+                              ? SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : Icon(Icons.download),
+                          label: Text(isDownloading ? 'Descargando...' : 'Descargar'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.green,
+                            padding: EdgeInsets.symmetric(vertical: 12),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              Expanded(child: _buildSongsList()),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildSongsList() {
+    if (_songs.isEmpty) {
+      return Center(
+        child: Text('No hay canciones', style: TextStyle(color: Colors.grey)),
+      );
+    }
+
+    return ListView.builder(
+      itemCount: _songs.length,
+      itemBuilder: (context, index) {
+        final song = _songs[index];
+        final isCurrent = _currentSong == song;
+        final songName = song.path.split('/').last;
+
+        return ListTile(
+          tileColor: isCurrent ? Colors.green.withOpacity(0.1) : null,
+          leading: Icon(Icons.music_note, color: isCurrent ? Colors.green : Colors.white),
+          title: Text(songName, style: TextStyle(color: Colors.white)),
+          onTap: () => _playSong(song),
+          trailing: IconButton(
+            icon: Icon(Icons.delete, color: Colors.red),
+            onPressed: () async {
+              if (isCurrent) await _audioPlayer.stop();
+              await song.delete();
+              await _loadSongs();
+              _showMessage('Eliminado');
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildTtsPage() {
+    final FlutterTts tts = FlutterTts();
+    final controller = TextEditingController();
+    double rate = 0.5;
+    double pitch = 1.0;
+    double vol = 1.0;
+    bool isSpeaking = false;
+
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      appBar: AppBar(title: Text('Texto a Voz')),
+      body: StatefulBuilder(
+        builder: (context, setState) {
+          return Padding(
+            padding: EdgeInsets.all(16),
+            child: Column(
+              children: [
+                TextField(
+                  controller: controller,
+                  maxLines: 5,
+                  style: TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    hintText: 'Escribe algo...',
+                    hintStyle: TextStyle(color: Colors.grey),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+                SizedBox(height: 12),
+                _buildSlider('Velocidad', Icons.speed, rate, 0.1, 1.0, (v) => setState(() => rate = v)),
+                _buildSlider('Tono', Icons.graphic_eq, pitch, 0.5, 2.0, (v) => setState(() => pitch = v)),
+                _buildSlider('Volumen', Icons.volume_up, vol, 0.0, 1.0, (v) => setState(() => vol = v)),
+                SizedBox(height: 12),
+                ElevatedButton.icon(
+                  onPressed: () async {
+                    if (controller.text.trim().isEmpty) return;
+                    if (isSpeaking) {
+                      await tts.stop();
+                      setState(() => isSpeaking = false);
+                    } else {
+                      await tts.setLanguage('es-ES');
+                      await tts.setSpeechRate(rate);
+                      await tts.setPitch(pitch);
+                      await tts.setVolume(vol);
+                      tts.setStartHandler(() => setState(() => isSpeaking = true));
+                      tts.setCompletionHandler(() => setState(() => isSpeaking = false));
+                      await tts.speak(controller.text.trim());
+                    }
+                  },
+                  icon: Icon(isSpeaking ? Icons.stop : Icons.play_arrow),
+                  label: Text(isSpeaking ? 'Detener' : 'Reproducir'),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildSlider(String label, IconData icon, double value, double min, double max, Function(double) onChanged) {
+    return Row(
+      children: [
+        Icon(icon, color: Colors.white),
+        SizedBox(width: 8),
+        Text(label, style: TextStyle(color: Colors.white)),
+        Expanded(
+          child: Slider(
+            value: value,
+            min: min,
+            max: max,
+            divisions: 20,
+            activeColor: Colors.green,
+            inactiveColor: Colors.grey,
+            onChanged: onChanged,
+          ),
+        ),
+        Text(value.toStringAsFixed(1), style: TextStyle(color: Colors.white)),
+      ],
+    );
+  }
 }
+
+ 

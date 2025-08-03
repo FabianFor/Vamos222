@@ -1,4 +1,4 @@
-name: mi_musica_app
+name: Fabichelo
 description: "Aplicación completa de música con descarga y texto a voz"
 publish_to: 'none'
 
@@ -17,6 +17,7 @@ dependencies:
   path_provider: ^2.1.3
   http: ^0.13.6
   permission_handler: ^11.1.0
+  audio_service: ^0.18.12
 
 dev_dependencies:
   flutter_test:
