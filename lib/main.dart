@@ -75,10 +75,14 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
               ],
             ),
           ),
-          StreamBuilder<bool>(
-            stream: _musicService.hasCurrentSongStream,
+          // Mini Player - SIEMPRE escucha el stream
+          StreamBuilder<File?>(
+            stream: _musicService.currentSongStream,
             builder: (context, snapshot) {
-              if (snapshot.data == true) {
+              final currentSong = snapshot.data;
+              print('🎵 Mini Player - Current song: ${currentSong?.path}'); // Debug
+              
+              if (currentSong != null) {
                 return MiniPlayer(
                   musicService: _musicService,
                   onTap: () => _navigateToFullPlayer(),
@@ -119,29 +123,44 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
   }
 
   void _navigateToFullPlayer() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => FullPlayerPage(musicService: _musicService),
-      ),
-    );
+    // Verificar que hay una canción actual antes de navegar
+    if (_musicService.currentSong != null) {
+      print('🎵 Navegando a reproductor completo con: ${_musicService.currentSong!.path}');
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => FullPlayerPage(musicService: _musicService),
+        ),
+      );
+    } else {
+      print('⚠️ No hay canción actual para mostrar en reproductor completo');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No hay canción reproduciéndose'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+    }
   }
 }
 
-// Servicio de música optimizado
+// Servicio de música corregido
 class MusicService {
   final AudioPlayer _audioPlayer = AudioPlayer();
   List<File> _songs = [];
   File? _currentSong;
   int _currentIndex = 0;
   
+  // StreamControllers con mejor manejo
   final _songsController = StreamController<List<File>>.broadcast();
   final _currentSongController = StreamController<File?>.broadcast();
-  final _hasCurrentSongController = StreamController<bool>.broadcast();
-
+  
   Stream<List<File>> get songsStream => _songsController.stream;
   Stream<File?> get currentSongStream => _currentSongController.stream;
-  Stream<bool> get hasCurrentSongStream => _hasCurrentSongController.stream;
+  
+  // Getter sincronizado para hasCurrentSong
+  Stream<bool> get hasCurrentSongStream => 
+      _currentSongController.stream.map((song) => song != null);
   
   List<File> get songs => _songs;
   File? get currentSong => _currentSong;
@@ -155,8 +174,18 @@ class MusicService {
 
   void _setupAudioPlayer() {
     _audioPlayer.playerStateStream.listen((state) {
+      print('🎵 Estado del reproductor: ${state.processingState}');
       if (state.processingState == ProcessingState.completed) {
         playNext();
+      }
+    });
+    
+    // Escuchar cuando el audio se carga exitosamente
+    _audioPlayer.durationStream.listen((duration) {
+      if (duration != null && _currentSong != null) {
+        print('🎶 Audio cargado correctamente: ${getSongName(_currentSong!)}');
+        // Re-notificar que tenemos una canción actual
+        _currentSongController.add(_currentSong);
       }
     });
   }
@@ -245,99 +274,222 @@ class MusicService {
       final musicDir = await getMusicDirectory();
       print('📁 Buscando archivos en: ${musicDir.path}');
       
-      final files = musicDir
-          .listSync()
-          .where((file) => _isAudioFile(file.path))
+      // Verificar si el directorio existe
+      if (!await musicDir.exists()) {
+        print('❌ El directorio no existe');
+        _songs = [];
+        _songsController.add(_songs);
+        return;
+      }
+      
+      // Listar todos los archivos
+      final allFiles = await musicDir.list().toList();
+      print('📂 Total de archivos encontrados: ${allFiles.length}');
+      
+      // Filtrar solo archivos de audio
+      final audioFiles = allFiles
+          .where((file) => file is File && _isAudioFile(file.path))
           .map((file) => File(file.path))
           .toList();
       
-      print('🎶 Archivos de audio encontrados: ${files.length}');
-      files.forEach((file) {
+      // Ordenar por nombre
+      audioFiles.sort((a, b) => a.path.split('/').last.compareTo(b.path.split('/').last));
+      
+      print('🎶 Archivos de audio encontrados: ${audioFiles.length}');
+      audioFiles.forEach((file) {
         print('   - ${file.path.split('/').last}');
       });
       
-      _songs = files;
+      _songs = audioFiles;
       _songsController.add(_songs);
+      
+      // Actualizar índice si la canción actual ya no existe
+      if (_currentSong != null && !_songs.contains(_currentSong)) {
+        print('⚠️ Canción actual eliminada, limpiando...');
+        _currentSong = null;
+        _currentSongController.add(null);
+        _currentIndex = 0;
+      }
+      
     } catch (e) {
       print('❌ Error cargando canciones: $e');
+      _songs = [];
+      _songsController.add(_songs);
     }
   }
 
   bool _isAudioFile(String path) {
-    return path.endsWith('.mp3') ||
-           path.endsWith('.webm') ||
-           path.endsWith('.m4a') ||
-           path.endsWith('.wav');
+    final lowerPath = path.toLowerCase();
+    return lowerPath.endsWith('.mp3') ||
+           lowerPath.endsWith('.webm') ||
+           lowerPath.endsWith('.m4a') ||
+           lowerPath.endsWith('.wav') ||
+           lowerPath.endsWith('.aac') ||
+           lowerPath.endsWith('.ogg') ||
+           lowerPath.endsWith('.flac');
   }
 
   Future<void> playSong(File song) async {
     try {
-      if (_currentSong == song && _audioPlayer.playing) {
-        await _audioPlayer.pause();
-      } else {
-        _currentSong = song;
-        _currentIndex = _songs.indexOf(song);
-        _currentSongController.add(_currentSong);
-        _hasCurrentSongController.add(true);
-        
-        await _audioPlayer.setFilePath(song.path);
-        await _audioPlayer.play();
+      print('🎵 Intentando reproducir: ${song.path}');
+      
+      // Verificar que el archivo existe
+      if (!await song.exists()) {
+        print('❌ El archivo no existe: ${song.path}');
+        return;
       }
+      
+      // Si es la misma canción y está reproduciendo, pausar/reanudar
+      if (_currentSong?.path == song.path && _audioPlayer.playing) {
+        await _audioPlayer.pause();
+        print('⏸️ Pausando canción actual');
+        return;
+      }
+      
+      // Si es la misma canción pero está pausada, reanudar
+      if (_currentSong?.path == song.path && !_audioPlayer.playing) {
+        await _audioPlayer.play();
+        print('▶️ Reanudando canción actual');
+        return;
+      }
+      
+      // DETENER cualquier reproducción actual
+      await _audioPlayer.stop();
+      
+      // Establecer nueva canción ANTES de cualquier operación
+      _currentSong = song;
+      _currentIndex = _songs.indexOf(song);
+      
+      // Notificar INMEDIATAMENTE el cambio
+      _currentSongController.add(_currentSong);
+      print('✅ Canción actual establecida: ${getSongName(song)}');
+      
+      // Configurar y reproducir audio
+      await _audioPlayer.setFilePath(song.path);
+      await _audioPlayer.play();
+      
+      print('🎶 Reproduciendo: ${getSongName(song)}');
+      
     } catch (e) {
-      print('Error playing song: $e');
+      print('❌ Error reproduciendo canción: $e');
+      // En caso de error, limpiar estado
+      _currentSong = null;
+      _currentSongController.add(null);
     }
   }
 
   String getSongName(File song) {
     return song.path.split('/').last
-        .replaceAll('.mp3', '')
-        .replaceAll('.webm', '')
-        .replaceAll('.m4a', '')
-        .replaceAll('.wav', '');
+        .replaceAll(RegExp(r'\.(mp3|webm|m4a|wav|aac|ogg|flac)$', caseSensitive: false), '');
   }
 
   Future<void> pauseResume() async {
-    if (_audioPlayer.playing) {
-      await _audioPlayer.pause();
-    } else {
-      await _audioPlayer.play();
+    try {
+      if (_audioPlayer.playing) {
+        await _audioPlayer.pause();
+      } else {
+        await _audioPlayer.play();
+      }
+    } catch (e) {
+      print('❌ Error en pauseResume: $e');
     }
   }
 
   Future<void> playNext() async {
     if (_songs.isNotEmpty) {
       _currentIndex = (_currentIndex + 1) % _songs.length;
-      await playSong(_songs[_currentIndex]);
+      final nextSong = _songs[_currentIndex];
+      
+      print('🎵 Cambiando a siguiente canción: ${getSongName(nextSong)}');
+      
+      try {
+        // Verificar que el archivo existe
+        if (!await nextSong.exists()) {
+          print('❌ El archivo no existe: ${nextSong.path}');
+          return;
+        }
+        
+        // DETENER música actual
+        await _audioPlayer.stop();
+        
+        // Establecer nueva canción INMEDIATAMENTE
+        _currentSong = nextSong;
+        _currentSongController.add(_currentSong);
+        
+        // Configurar y reproducir SIN pausa
+        await _audioPlayer.setFilePath(nextSong.path);
+        await _audioPlayer.play();
+        
+        print('✅ Reproduciendo siguiente: ${getSongName(nextSong)}');
+        
+      } catch (e) {
+        print('❌ Error cambiando a siguiente canción: $e');
+      }
     }
   }
 
   Future<void> playPrevious() async {
     if (_songs.isNotEmpty) {
       _currentIndex = _currentIndex > 0 ? _currentIndex - 1 : _songs.length - 1;
-      await playSong(_songs[_currentIndex]);
+      final previousSong = _songs[_currentIndex];
+      
+      print('🎵 Cambiando a canción anterior: ${getSongName(previousSong)}');
+      
+      try {
+        // Verificar que el archivo existe
+        if (!await previousSong.exists()) {
+          print('❌ El archivo no existe: ${previousSong.path}');
+          return;
+        }
+        
+        // DETENER música actual
+        await _audioPlayer.stop();
+        
+        // Establecer nueva canción INMEDIATAMENTE
+        _currentSong = previousSong;
+        _currentSongController.add(_currentSong);
+        
+        // Configurar y reproducir SIN pausa
+        await _audioPlayer.setFilePath(previousSong.path);
+        await _audioPlayer.play();
+        
+        print('✅ Reproduciendo anterior: ${getSongName(previousSong)}');
+        
+      } catch (e) {
+        print('❌ Error cambiando a canción anterior: $e');
+      }
     }
   }
 
   Future<void> deleteSong(File song) async {
-    if (_currentSong == song) {
-      await _audioPlayer.stop();
-      _currentSong = null;
-      _currentSongController.add(null);
-      _hasCurrentSongController.add(false);
+    try {
+      // Si es la canción actual, detener reproducción
+      if (_currentSong == song) {
+        await _audioPlayer.stop();
+        _currentSong = null;
+        _currentSongController.add(null);
+      }
+      
+      // Eliminar archivo
+      await song.delete();
+      print('🗑️ Archivo eliminado: ${song.path}');
+      
+      // Recargar lista
+      await loadSongs();
+      
+    } catch (e) {
+      print('❌ Error eliminando canción: $e');
     }
-    await song.delete();
-    await loadSongs();
   }
 
   void dispose() {
     _audioPlayer.dispose();
     _songsController.close();
     _currentSongController.close();
-    _hasCurrentSongController.close();
   }
 }
 
-// Mini reproductor optimizado
+// Mini reproductor con mejor detección
 class MiniPlayer extends StatelessWidget {
   final MusicService musicService;
   final VoidCallback onTap;
@@ -350,27 +502,36 @@ class MiniPlayer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        height: 70,
-        decoration: const BoxDecoration(
-          color: Color(0xFF161B22),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black26,
-              blurRadius: 8,
-              offset: Offset(0, -2),
+    return StreamBuilder<File?>(
+      stream: musicService.currentSongStream,
+      builder: (context, snapshot) {
+        final currentSong = snapshot.data;
+        print('🎵 MiniPlayer render - Current song: ${currentSong?.path}'); // Debug
+        
+        // Si no hay canción, no mostrar nada
+        if (currentSong == null) {
+          print('🎵 MiniPlayer - No hay canción, ocultando');
+          return const SizedBox.shrink();
+        }
+        
+        return GestureDetector(
+          onTap: () {
+            print('🎵 MiniPlayer tocado - navegando a reproductor completo');
+            onTap();
+          },
+          child: Container(
+            height: 70,
+            decoration: const BoxDecoration(
+              color: Color(0xFF161B22),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black26,
+                  blurRadius: 8,
+                  offset: Offset(0, -2),
+                ),
+              ],
             ),
-          ],
-        ),
-        child: StreamBuilder<File?>(
-          stream: musicService.currentSongStream,
-          builder: (context, snapshot) {
-            final currentSong = snapshot.data;
-            if (currentSong == null) return const SizedBox.shrink();
-            
-            return Row(
+            child: Row(
               children: [
                 Container(
                   width: 50,
@@ -409,7 +570,10 @@ class MiniPlayer extends StatelessWidget {
                   builder: (context, snapshot) {
                     final isPlaying = snapshot.data ?? false;
                     return IconButton(
-                      onPressed: musicService.pauseResume,
+                      onPressed: () {
+                        print('🎵 MiniPlayer - botón play/pause presionado');
+                        musicService.pauseResume();
+                      },
                       icon: Icon(
                         isPlaying ? Icons.pause : Icons.play_arrow,
                         color: Colors.white,
@@ -419,15 +583,15 @@ class MiniPlayer extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
               ],
-            );
-          },
-        ),
-      ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
 
-// Página de música optimizada
+// Página de música mejorada
 class MusicPage extends StatelessWidget {
   final MusicService musicService;
 
@@ -490,6 +654,11 @@ class MusicPage extends StatelessWidget {
         title: const Text('Fabichelo Musica'),
         centerTitle: true,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: () => musicService.loadSongs(),
+            tooltip: 'Actualizar lista',
+          ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => _showPermissionsDialog(context),
@@ -665,7 +834,7 @@ class _DownloadSectionState extends State<DownloadSection> {
   }
 }
 
-// Lista de canciones optimizada
+// Lista de canciones corregida
 class SongsList extends StatelessWidget {
   final MusicService musicService;
 
@@ -680,7 +849,23 @@ class SongsList extends StatelessWidget {
         
         if (songs.isEmpty) {
           return const Center(
-            child: Text('No hay canciones', style: TextStyle(color: Colors.grey)),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.music_off, size: 64, color: Colors.grey),
+                SizedBox(height: 16),
+                Text(
+                  'No hay canciones',
+                  style: TextStyle(color: Colors.grey, fontSize: 18),
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'Descarga música o coloca archivos\nen la carpeta Fabichelo',
+                  style: TextStyle(color: Colors.grey),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
           );
         }
 
@@ -691,17 +876,31 @@ class SongsList extends StatelessWidget {
             return StreamBuilder<File?>(
               stream: musicService.currentSongStream,
               builder: (context, currentSnapshot) {
-                final isCurrent = currentSnapshot.data == song;
+                final isCurrent = currentSnapshot.data?.path == song.path;
                 final songName = musicService.getSongName(song);
 
                 return ListTile(
                   tileColor: isCurrent ? Colors.green.withOpacity(0.1) : null,
                   leading: Icon(
-                    Icons.music_note,
+                    isCurrent ? Icons.volume_up : Icons.music_note,
                     color: isCurrent ? Colors.green : Colors.white,
                   ),
-                  title: Text(songName, style: const TextStyle(color: Colors.white)),
-                  onTap: () => musicService.playSong(song),
+                  title: Text(
+                    songName,
+                    style: TextStyle(
+                      color: isCurrent ? Colors.green : Colors.white,
+                      fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                    ),
+                  ),
+                  subtitle: Text(
+                    '${(song.lengthSync() / (1024 * 1024)).toStringAsFixed(1)} MB',
+                    style: const TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
+                  onTap: () {
+                    print('🎵 Tocando canción: $songName');
+                    print('🎵 Archivo existe: ${song.existsSync()}');
+                    musicService.playSong(song);
+                  },
                   trailing: IconButton(
                     icon: const Icon(Icons.delete, color: Colors.red),
                     onPressed: () => _showDeleteDialog(context, song),
@@ -749,11 +948,33 @@ class SongsList extends StatelessWidget {
   }
 }
 
-// Reproductor completo
-class FullPlayerPage extends StatelessWidget {
+// Reproductor completo con inicialización mejorada
+class FullPlayerPage extends StatefulWidget {
   final MusicService musicService;
 
   const FullPlayerPage({Key? key, required this.musicService}) : super(key: key);
+
+  @override
+  _FullPlayerPageState createState() => _FullPlayerPageState();
+}
+
+class _FullPlayerPageState extends State<FullPlayerPage> {
+  File? _initialSong;
+
+  @override
+  void initState() {
+    super.initState();
+    // Capturar la canción actual al inicializar
+    _initialSong = widget.musicService.currentSong;
+    print('🎵 FullPlayer inicializado con canción: ${_initialSong?.path}');
+    
+    // Si no hay canción inicial, cerrar la pantalla
+    if (_initialSong == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        Navigator.pop(context);
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -770,12 +991,39 @@ class FullPlayerPage extends StatelessWidget {
         centerTitle: true,
       ),
       body: StreamBuilder<File?>(
-        stream: musicService.currentSongStream,
+        stream: widget.musicService.currentSongStream,
+        initialData: _initialSong, // Usar la canción inicial como dato inicial
         builder: (context, snapshot) {
-          final currentSong = snapshot.data;
+          final currentSong = snapshot.data ?? _initialSong; // Fallback a la canción inicial
+          print('🎵 FullPlayer - Current song: ${currentSong?.path}');
+          print('🎵 FullPlayer - Initial song: ${_initialSong?.path}');
+          print('🎵 FullPlayer - Snapshot connectionState: ${snapshot.connectionState}');
+          print('🎵 FullPlayer - Snapshot hasData: ${snapshot.hasData}');
+          
           if (currentSong == null) {
-            return const Center(
-              child: Text('No hay canción seleccionada', style: TextStyle(color: Colors.grey)),
+            return Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.music_off, size: 64, color: Colors.grey),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'No hay canción seleccionada',
+                    style: TextStyle(color: Colors.grey, fontSize: 18),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Selecciona una canción para reproducir',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                  const SizedBox(height: 20),
+                  ElevatedButton(
+                    onPressed: () => Navigator.pop(context),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                    child: const Text('Volver a la lista'),
+                  ),
+                ],
+              ),
             );
           }
 
@@ -812,7 +1060,7 @@ class FullPlayerPage extends StatelessWidget {
                 const SizedBox(height: 40),
                 // Song title
                 Text(
-                  musicService.getSongName(currentSong),
+                  widget.musicService.getSongName(currentSong),
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 24,
@@ -833,10 +1081,10 @@ class FullPlayerPage extends StatelessWidget {
                 const SizedBox(height: 40),
                 // Progress bar
                 StreamBuilder<Duration>(
-                  stream: musicService.audioPlayer.positionStream,
+                  stream: widget.musicService.audioPlayer.positionStream,
                   builder: (context, positionSnapshot) {
                     return StreamBuilder<Duration?>(
-                      stream: musicService.audioPlayer.durationStream,
+                      stream: widget.musicService.audioPlayer.durationStream,
                       builder: (context, durationSnapshot) {
                         final position = positionSnapshot.data ?? Duration.zero;
                         final duration = durationSnapshot.data ?? Duration.zero;
@@ -857,7 +1105,7 @@ class FullPlayerPage extends StatelessWidget {
                                   final newPosition = Duration(
                                     seconds: (duration.inSeconds * value).round(),
                                   );
-                                  musicService.audioPlayer.seek(newPosition);
+                                  widget.musicService.audioPlayer.seek(newPosition);
                                 },
                                 activeColor: Colors.green,
                                 inactiveColor: Colors.grey[700],
@@ -896,13 +1144,13 @@ class FullPlayerPage extends StatelessWidget {
                         shape: BoxShape.circle,
                       ),
                       child: IconButton(
-                        onPressed: musicService.playPrevious,
+                        onPressed: widget.musicService.playPrevious,
                         icon: const Icon(Icons.skip_previous, size: 30),
                         color: Colors.white,
                       ),
                     ),
                     StreamBuilder<bool>(
-                      stream: musicService.audioPlayer.playingStream,
+                      stream: widget.musicService.audioPlayer.playingStream,
                       builder: (context, snapshot) {
                         final isPlaying = snapshot.data ?? false;
                         return Container(
@@ -913,7 +1161,7 @@ class FullPlayerPage extends StatelessWidget {
                             shape: BoxShape.circle,
                           ),
                           child: IconButton(
-                            onPressed: musicService.pauseResume,
+                            onPressed: widget.musicService.pauseResume,
                             icon: Icon(
                               isPlaying ? Icons.pause : Icons.play_arrow,
                               size: 40,
@@ -929,7 +1177,7 @@ class FullPlayerPage extends StatelessWidget {
                         shape: BoxShape.circle,
                       ),
                       child: IconButton(
-                        onPressed: musicService.playNext,
+                        onPressed: widget.musicService.playNext,
                         icon: const Icon(Icons.skip_next, size: 30),
                         color: Colors.white,
                       ),
@@ -939,7 +1187,7 @@ class FullPlayerPage extends StatelessWidget {
                 const Spacer(),
                 // Volume control
                 StreamBuilder<double>(
-                  stream: musicService.audioPlayer.volumeStream,
+                  stream: widget.musicService.audioPlayer.volumeStream,
                   builder: (context, snapshot) {
                     final volume = snapshot.data ?? 1.0;
                     return Row(
@@ -954,7 +1202,7 @@ class FullPlayerPage extends StatelessWidget {
                             child: Slider(
                               value: volume,
                               onChanged: (value) {
-                                musicService.audioPlayer.setVolume(value);
+                                widget.musicService.audioPlayer.setVolume(value);
                               },
                               activeColor: Colors.green,
                               inactiveColor: Colors.grey[700],
