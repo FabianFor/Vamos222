@@ -7,9 +7,14 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
+import 'services/background_download_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  // Inicializar servicio de descargas en segundo plano
+  await BackgroundDownloadService.initialize();
+  
   runApp(const MyApp());
 }
 
@@ -50,7 +55,7 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(length: 3, vsync: this); // Agregamos una pestaña más
     _musicService.initialize();
   }
 
@@ -58,6 +63,7 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
   void dispose() {
     _tabController.dispose();
     _musicService.dispose();
+    BackgroundDownloadService.dispose();
     super.dispose();
   }
 
@@ -71,6 +77,7 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
               controller: _tabController,
               children: [
                 MusicPage(musicService: _musicService),
+                const DownloadsPage(), // Nueva página de descargas
                 const TtsPage(),
               ],
             ),
@@ -113,6 +120,7 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
         controller: _tabController,
         tabs: const [
           Tab(icon: Icon(Icons.music_note), text: 'Música'),
+          Tab(icon: Icon(Icons.download), text: 'Descargas'),
           Tab(icon: Icon(Icons.record_voice_over), text: 'TTS'),
         ],
         labelColor: Colors.green,
@@ -141,6 +149,387 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
         ),
       );
     }
+  }
+}
+
+// Nueva página de descargas
+class DownloadsPage extends StatefulWidget {
+  const DownloadsPage({Key? key}) : super(key: key);
+
+  @override
+  _DownloadsPageState createState() => _DownloadsPageState();
+}
+
+class _DownloadsPageState extends State<DownloadsPage> {
+  final TextEditingController _urlController = TextEditingController();
+  final List<DownloadItem> _downloadQueue = [];
+  final MusicService _musicService = MusicService();
+
+  @override
+  void initState() {
+    super.initState();
+    _musicService.initialize();
+    _listenToDownloadProgress();
+  }
+
+  void _listenToDownloadProgress() {
+    BackgroundDownloadService.progressStream.listen((progress) {
+      setState(() {
+        // Actualizar el progreso en la cola
+        final index = _downloadQueue.indexWhere((item) => item.url == progress.url);
+        if (index != -1) {
+          _downloadQueue[index] = _downloadQueue[index].copyWith(
+            progress: progress.progress,
+            isCompleted: progress.isCompleted,
+            isError: progress.isError,
+            errorMessage: progress.errorMessage,
+          );
+          
+          // Si la descarga se completó, recargar la lista de música
+          if (progress.isCompleted) {
+            _musicService.loadSongs();
+          }
+        }
+      });
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      appBar: AppBar(
+        title: const Text('Gestor de Descargas'),
+        centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.clear_all),
+            onPressed: _clearCompleted,
+            tooltip: 'Limpiar completadas',
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          // Sección de agregar descarga
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    TextField(
+                      controller: _urlController,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: InputDecoration(
+                        labelText: 'Pega el link de YouTube',
+                        labelStyle: const TextStyle(color: Colors.grey),
+                        prefixIcon: const Icon(Icons.link, color: Colors.grey),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: const BorderSide(color: Colors.grey),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: const BorderSide(color: Colors.green),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    ElevatedButton.icon(
+                      onPressed: _addDownload,
+                      icon: const Icon(Icons.add_to_queue),
+                      label: const Text('Agregar a Cola'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          // Lista de descargas
+          Expanded(
+            child: _downloadQueue.isEmpty
+                ? const Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.download_outlined, size: 64, color: Colors.grey),
+                        SizedBox(height: 16),
+                        Text(
+                          'No hay descargas',
+                          style: TextStyle(color: Colors.grey, fontSize: 18),
+                        ),
+                        SizedBox(height: 8),
+                        Text(
+                          'Agrega un enlace de YouTube para empezar',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      ],
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: _downloadQueue.length,
+                    itemBuilder: (context, index) {
+                      final item = _downloadQueue[index];
+                      return DownloadItemWidget(
+                        item: item,
+                        onCancel: () => _cancelDownload(item),
+                        onRemove: () => _removeDownload(item),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _addDownload() async {
+    final url = _urlController.text.trim();
+    if (!url.contains('youtube.com') && !url.contains('youtu.be')) {
+      _showMessage('URL no válida', isError: true);
+      return;
+    }
+
+    // Verificar si ya está en la cola
+    if (_downloadQueue.any((item) => item.url == url)) {
+      _showMessage('Esta URL ya está en la cola', isError: true);
+      return;
+    }
+
+    setState(() {
+      _downloadQueue.add(DownloadItem(
+        url: url,
+        filename: 'Obteniendo información...',
+        progress: 0,
+        isCompleted: false,
+        isError: false,
+      ));
+    });
+
+    _urlController.clear();
+    _showMessage('Agregado a la cola de descarga');
+
+    // Procesar la descarga
+    _processDownload(url);
+  }
+
+  Future<void> _processDownload(String url) async {
+    try {
+      print('🌐 Obteniendo información del video...');
+      final response = await http.post(
+        Uri.parse('https://servermusica-1.onrender.com/download'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'url': url}),
+      ).timeout(const Duration(minutes: 2));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final filename = data['file'];
+        final downloadUrl = 'https://servermusica-1.onrender.com/downloads/$filename';
+
+        // Actualizar información del archivo
+        setState(() {
+          final index = _downloadQueue.indexWhere((item) => item.url == url);
+          if (index != -1) {
+            _downloadQueue[index] = _downloadQueue[index].copyWith(filename: filename);
+          }
+        });
+
+        // Obtener directorio de destino
+        final dir = await _musicService.getMusicDirectory();
+        final savePath = '${dir.path}/$filename';
+
+        // Iniciar descarga en segundo plano
+        await BackgroundDownloadService.startDownload(
+          url: url,
+          filename: filename,
+          downloadUrl: downloadUrl,
+          savePath: savePath,
+        );
+
+      } else {
+        final error = jsonDecode(response.body)['error'] ?? 'Error desconocido';
+        setState(() {
+          final index = _downloadQueue.indexWhere((item) => item.url == url);
+          if (index != -1) {
+            _downloadQueue[index] = _downloadQueue[index].copyWith(
+              isError: true,
+              errorMessage: error,
+            );
+          }
+        });
+      }
+    } catch (e) {
+      setState(() {
+        final index = _downloadQueue.indexWhere((item) => item.url == url);
+        if (index != -1) {
+          _downloadQueue[index] = _downloadQueue[index].copyWith(
+            isError: true,
+            errorMessage: e.toString(),
+          );
+        }
+      });
+    }
+  }
+
+  void _cancelDownload(DownloadItem item) {
+    if (!item.isCompleted && !item.isError) {
+      BackgroundDownloadService.cancelDownload(item.url);
+    }
+  }
+
+  void _removeDownload(DownloadItem item) {
+    setState(() {
+      _downloadQueue.removeWhere((download) => download.url == item.url);
+    });
+  }
+
+  void _clearCompleted() {
+    setState(() {
+      _downloadQueue.removeWhere((item) => item.isCompleted || item.isError);
+    });
+  }
+
+  void _showMessage(String message, {bool isError = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: isError ? Colors.red : Colors.green,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _urlController.dispose();
+    _musicService.dispose();
+    super.dispose();
+  }
+}
+
+// Widget para mostrar cada item de descarga
+class DownloadItemWidget extends StatelessWidget {
+  final DownloadItem item;
+  final VoidCallback onCancel;
+  final VoidCallback onRemove;
+
+  const DownloadItemWidget({
+    Key? key,
+    required this.item,
+    required this.onCancel,
+    required this.onRemove,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    item.filename,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w500,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (item.isCompleted)
+                  const Icon(Icons.check_circle, color: Colors.green)
+                else if (item.isError)
+                  const Icon(Icons.error, color: Colors.red)
+                else
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.grey),
+                    onPressed: onCancel,
+                    tooltip: 'Cancelar',
+                  ),
+                IconButton(
+                  icon: const Icon(Icons.delete, color: Colors.red),
+                  onPressed: onRemove,
+                  tooltip: 'Eliminar',
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (!item.isError && !item.isCompleted) ...[
+              LinearProgressIndicator(
+                value: item.progress / 100,
+                backgroundColor: Colors.grey[700],
+                valueColor: const AlwaysStoppedAnimation<Color>(Colors.green),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '${item.progress}%',
+                style: const TextStyle(color: Colors.grey, fontSize: 12),
+              ),
+            ] else if (item.isError) ...[
+              Text(
+                'Error: ${item.errorMessage ?? "Error desconocido"}',
+                style: const TextStyle(color: Colors.red, fontSize: 12),
+              ),
+            ] else if (item.isCompleted) ...[
+              const Text(
+                'Descarga completada ✓',
+                style: TextStyle(color: Colors.green, fontSize: 12),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Clase para representar un item de descarga
+class DownloadItem {
+  final String url;
+  final String filename;
+  final int progress;
+  final bool isCompleted;
+  final bool isError;
+  final String? errorMessage;
+
+  DownloadItem({
+    required this.url,
+    required this.filename,
+    required this.progress,
+    required this.isCompleted,
+    required this.isError,
+    this.errorMessage,
+  });
+
+  DownloadItem copyWith({
+    String? filename,
+    int? progress,
+    bool? isCompleted,
+    bool? isError,
+    String? errorMessage,
+  }) {
+    return DownloadItem(
+      url: url,
+      filename: filename ?? this.filename,
+      progress: progress ?? this.progress,
+      isCompleted: isCompleted ?? this.isCompleted,
+      isError: isError ?? this.isError,
+      errorMessage: errorMessage ?? this.errorMessage,
+    );
   }
 }
 
@@ -591,7 +980,7 @@ class MiniPlayer extends StatelessWidget {
   }
 }
 
-// Página de música mejorada
+// Página de música simplificada (sin sección de descarga)
 class MusicPage extends StatelessWidget {
   final MusicService musicService;
 
@@ -651,7 +1040,7 @@ class MusicPage extends StatelessWidget {
     return Scaffold(
       backgroundColor: Colors.transparent,
       appBar: AppBar(
-        title: const Text('Fabichelo Musica'),
+        title: const Text('Mi Música'),
         centerTitle: true,
         actions: [
           IconButton(
@@ -678,159 +1067,8 @@ class MusicPage extends StatelessWidget {
           ),
         ],
       ),
-      body: Column(
-        children: [
-          DownloadSection(musicService: musicService),
-          Expanded(child: SongsList(musicService: musicService)),
-        ],
-      ),
+      body: SongsList(musicService: musicService),
     );
-  }
-}
-
-// Sección de descarga optimizada
-class DownloadSection extends StatefulWidget {
-  final MusicService musicService;
-
-  const DownloadSection({Key? key, required this.musicService}) : super(key: key);
-
-  @override
-  _DownloadSectionState createState() => _DownloadSectionState();
-}
-
-class _DownloadSectionState extends State<DownloadSection> {
-  final TextEditingController _urlController = TextEditingController();
-  bool _isDownloading = false;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            children: [
-              TextField(
-                controller: _urlController,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  labelText: 'Pega el link de YouTube',
-                  labelStyle: const TextStyle(color: Colors.grey),
-                  prefixIcon: const Icon(Icons.link, color: Colors.grey),
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Colors.grey),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Colors.green),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              ElevatedButton.icon(
-                onPressed: _isDownloading ? null : _downloadSong,
-                icon: _isDownloading
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      )
-                    : const Icon(Icons.download),
-                label: Text(_isDownloading ? 'Descargando...' : 'Descargar'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.green,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _downloadSong() async {
-    final url = _urlController.text.trim();
-    if (!url.contains('youtube.com') && !url.contains('youtu.be')) {
-      _showMessage('URL no válida');
-      return;
-    }
-
-    setState(() => _isDownloading = true);
-    print('⬇️ Iniciando descarga para: $url');
-
-    try {
-      print('🌐 Enviando solicitud al servidor...');
-      final response = await http.post(
-        Uri.parse('https://servermusica-1.onrender.com/download'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'url': url}),
-      ).timeout(const Duration(minutes: 5));
-
-      print('📡 Respuesta del servidor: ${response.statusCode}');
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final filename = data['file'];
-        final downloadUrl = 'https://servermusica-1.onrender.com/downloads/$filename';
-
-        print('📥 Descargando archivo: $filename');
-        print('🔗 URL de descarga: $downloadUrl');
-
-        final audioResponse = await http.get(Uri.parse(downloadUrl));
-        print('📦 Tamaño del archivo: ${audioResponse.bodyBytes.length} bytes');
-
-        final dir = await widget.musicService.getMusicDirectory();
-        final file = File('${dir.path}/$filename');
-        
-        print('💾 Guardando archivo en: ${file.path}');
-        await file.writeAsBytes(audioResponse.bodyBytes);
-        
-        // Verificar que el archivo se guardó correctamente
-        if (await file.exists()) {
-          final fileSize = await file.length();
-          print('✅ Archivo guardado exitosamente. Tamaño: $fileSize bytes');
-          _showMessage('Descargado: $filename');
-        } else {
-          print('❌ Error: El archivo no se guardó correctamente');
-          _showMessage('Error: No se pudo guardar el archivo');
-        }
-
-        _urlController.clear();
-        await widget.musicService.loadSongs();
-      } else {
-        final error = jsonDecode(response.body)['error'] ?? 'Error desconocido';
-        print('❌ Error del servidor: $error');
-        _showMessage('Error: $error');
-      }
-    } catch (e) {
-      print('❌ Error durante la descarga: $e');
-      _showMessage('Error: $e');
-    } finally {
-      setState(() => _isDownloading = false);
-    }
-  }
-
-  void _showMessage(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: Colors.green,
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
-  }
-
-  @override
-  void dispose() {
-    _urlController.dispose();
-    super.dispose();
   }
 }
 
@@ -860,7 +1098,7 @@ class SongsList extends StatelessWidget {
                 ),
                 SizedBox(height: 8),
                 Text(
-                  'Descarga música o coloca archivos\nen la carpeta Fabichelo',
+                  'Ve a la pestaña "Descargas" para\nagregar música desde YouTube',
                   style: TextStyle(color: Colors.grey),
                   textAlign: TextAlign.center,
                 ),

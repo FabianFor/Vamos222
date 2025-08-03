@@ -12,6 +12,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true // ✅ Kotlin DSL usa "isCoreLibraryDesugaringEnabled"
     }
 
     kotlinOptions {
@@ -24,7 +25,7 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
-        
+
         manifestPlaceholders.putAll(emptyMap())
         vectorDrawables {
             useSupportLibrary = true
@@ -83,4 +84,5 @@ flutter {
 
 dependencies {
     implementation("androidx.multidex:multidex:2.0.1")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4") // ✅ Necesario para compatibilidad con Java 8+
 }
