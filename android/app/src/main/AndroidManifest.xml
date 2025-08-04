@@ -1,32 +1,30 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Permisos de red -->
+    <!-- Permisos de red y almacenamiento -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-    
-    <!-- Permisos de almacenamiento -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="28"/>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
-    
+
     <!-- Permisos para Android 13+ (API 33+) -->
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-    
+
     <!-- Permisos para audio y servicios -->
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
-    
-    <!-- Permisos adicionales -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND"/>
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_USE_DATA_IN_BACKGROUND"/>
 
     <application
         android:label="Fabichelo"
@@ -48,9 +46,8 @@
 
             <!-- Tema que se muestra mientras Flutter carga -->
             <meta-data
-              android:name="io.flutter.embedding.android.NormalTheme"
-              android:resource="@style/NormalTheme"
-            />
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme"/>
 
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.MAIN"/>
@@ -58,14 +55,14 @@
             </intent-filter>
         </activity>
 
-        <!-- Servicio de descarga en segundo plano -->
+        <!-- Servicio de segundo plano (flutter_background_service) -->
         <service
             android:name="id.flutter.flutter_background_service.BackgroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync"
-            tools:replace="android:exported" />
+            tools:replace="android:exported"/>
 
-        <!-- Receptor para arranque del sistema -->
+        <!-- Receptor para arranque del sistema (flutter_background_service) -->
         <receiver
             android:name="id.flutter.flutter_background_service.BootReceiver"
             android:enabled="true"
@@ -79,15 +76,20 @@
             </intent-filter>
         </receiver>
 
+        <!-- Receptor para notificaciones locales -->
+        <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" />
+        <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+            </intent-filter>
+        </receiver>
+
         <!-- Configuración para Flutter -->
-        <meta-data
-            android:name="flutterEmbedding"
-            android:value="2" />
-            
-        <!-- Configuración de red para permitir HTTP -->
-        <meta-data 
-            android:name="io.flutter.network.http.usesCleartextTraffic" 
-            android:value="true" />
+        <meta-data android:name="flutterEmbedding" android:value="2"/>
+        <meta-data android:name="io.flutter.network.http.usesCleartextTraffic" android:value="true"/>
     </application>
 
     <!-- Queries para compatibilidad -->
@@ -96,21 +98,20 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
-        
         <intent>
             <action android:name="android.media.action.IMAGE_CAPTURE"/>
         </intent>
         <intent>
             <action android:name="android.media.action.VIDEO_CAPTURE"/>
         </intent>
-        
         <intent>
             <action android:name="android.net.conn.CONNECTIVITY_CHANGE"/>
         </intent>
-        
-        <!-- Para verificar apps de música -->
         <intent>
             <action android:name="android.intent.action.MUSIC_PLAYER"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
         </intent>
     </queries>
 </manifest>

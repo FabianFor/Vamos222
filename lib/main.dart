@@ -4,13 +4,293 @@ import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
+import 'dart:ui';
+
+// Configuración para notificaciones
+const String notificationChannelId = 'download_channel';
+const String notificationChannelName = 'Descargas de Música';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await initializeService();
   runApp(const MyApp());
+}
+
+// Inicializar el servicio de segundo plano
+Future<void> initializeService() async {
+  final service = FlutterBackgroundService();
+  
+  // Configurar notificaciones
+  const AndroidNotificationChannel channel = AndroidNotificationChannel(
+    notificationChannelId,
+    notificationChannelName,
+    description: 'Canal para notificaciones de descarga',
+    importance: Importance.low,
+  );
+
+  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+      FlutterLocalNotificationsPlugin();
+
+  await flutterLocalNotificationsPlugin
+      .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(channel);
+
+  await service.configure(
+    androidConfiguration: AndroidConfiguration(
+      onStart: onStart,
+      autoStart: true,
+      isForegroundMode: true,
+      notificationChannelId: notificationChannelId,
+      initialNotificationTitle: 'Fabichelo',
+      initialNotificationContent: 'Servicio de descarga iniciado',
+      foregroundServiceNotificationId: 888,
+    ),
+    iosConfiguration: IosConfiguration(
+      autoStart: true,
+      onForeground: onStart,
+      onBackground: onIosBackground,
+    ),
+  );
+}
+
+@pragma('vm:entry-point')
+void onStart(ServiceInstance service) async {
+  DartPluginRegistrant.ensureInitialized();
+  
+  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+      FlutterLocalNotificationsPlugin();
+
+  // Escuchar comandos de descarga
+  service.on('startDownload').listen((event) async {
+    final url = event!['url'] as String;
+    final downloadId = event['downloadId'] as String;
+    
+    print('🌐 Servicio: Iniciando descarga $downloadId');
+    
+    try {
+      // Actualizar notificación
+      flutterLocalNotificationsPlugin.show(
+        downloadId.hashCode,
+        'Descargando música',
+        'Preparando descarga...',
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            notificationChannelId,
+            notificationChannelName,
+            importance: Importance.low,
+            priority: Priority.low,
+            showProgress: true,
+            maxProgress: 100,
+            progress: 0,
+          ),
+        ),
+      );
+
+      // Hacer la descarga
+      await _performDownload(url, downloadId, service, flutterLocalNotificationsPlugin);
+      
+    } catch (e) {
+      print('❌ Servicio: Error en descarga $downloadId: $e');
+      
+      // Notificar error
+      service.invoke('downloadError', {
+        'downloadId': downloadId,
+        'error': e.toString(),
+      });
+      
+      flutterLocalNotificationsPlugin.show(
+        downloadId.hashCode,
+        'Error en descarga',
+        'No se pudo completar la descarga',
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            notificationChannelId,
+            notificationChannelName,
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
+        ),
+      );
+    }
+  });
+
+  service.on('stopService').listen((event) {
+    service.stopSelf();
+  });
+}
+
+Future<void> _performDownload(
+  String url, 
+  String downloadId, 
+  ServiceInstance service,
+  FlutterLocalNotificationsPlugin notificationsPlugin,
+) async {
+  try {
+    // Notificar que está obteniendo información
+    service.invoke('downloadProgress', {
+      'downloadId': downloadId,
+      'progress': 0,
+      'status': 'preparing',
+      'filename': 'Obteniendo información...',
+    });
+
+    // Obtener información del video con timeout más largo
+    final response = await http.post(
+      Uri.parse('https://servermusica-1.onrender.com/download'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Connection': 'keep-alive',
+      },
+      body: jsonEncode({'url': url}),
+    ).timeout(const Duration(minutes: 5)); // Timeout más largo
+
+    if (response.statusCode != 200) {
+      final error = jsonDecode(response.body)['error'] ?? 'Error del servidor';
+      throw Exception(error);
+    }
+
+    final data = jsonDecode(response.body);
+    final filename = data['file'] as String;
+    final downloadUrl = 'https://servermusica-1.onrender.com/downloads/$filename';
+
+    // Actualizar con el nombre del archivo
+    service.invoke('downloadProgress', {
+      'downloadId': downloadId,
+      'progress': 10,
+      'status': 'downloading',
+      'filename': filename,
+    });
+
+    // Obtener directorio de música
+    final Directory musicDir = await _getMusicDirectory();
+    final String savePath = '${musicDir.path}/$filename';
+
+    print('📥 Servicio: Descargando desde $downloadUrl');
+    
+    // Descargar archivo con progreso
+    final request = http.Request('GET', Uri.parse(downloadUrl));
+    request.headers['Connection'] = 'keep-alive';
+    
+    final streamedResponse = await http.Client().send(request);
+    
+    if (streamedResponse.statusCode != 200) {
+      throw Exception('Error al descargar el archivo: ${streamedResponse.statusCode}');
+    }
+
+    final List<int> bytes = [];
+    int downloaded = 0;
+    final int total = streamedResponse.contentLength ?? 0;
+
+    await for (final chunk in streamedResponse.stream) {
+      bytes.addAll(chunk);
+      downloaded += chunk.length;
+      
+      if (total > 0) {
+        final progress = (downloaded / total * 90).round() + 10; // 10-100%
+        
+        // Actualizar progreso cada 5%
+        if (progress % 5 == 0) {
+          service.invoke('downloadProgress', {
+            'downloadId': downloadId,
+            'progress': progress,
+            'status': 'downloading',
+            'filename': filename,
+          });
+
+          // Actualizar notificación
+          notificationsPlugin.show(
+            downloadId.hashCode,
+            'Descargando: $filename',
+            '$progress% completado',
+            NotificationDetails(
+              android: AndroidNotificationDetails(
+                notificationChannelId,
+                notificationChannelName,
+                importance: Importance.low,
+                priority: Priority.low,
+                showProgress: true,
+                maxProgress: 100,
+                progress: progress,
+              ),
+            ),
+          );
+        }
+      }
+    }
+
+    // Guardar archivo
+    final file = File(savePath);
+    await file.writeAsBytes(bytes);
+
+    if (await file.exists() && await file.length() > 0) {
+      // Descarga completada
+      service.invoke('downloadCompleted', {
+        'downloadId': downloadId,
+        'filename': filename,
+        'path': savePath,
+      });
+
+      // Notificación de éxito
+      notificationsPlugin.show(
+        downloadId.hashCode,
+        'Descarga completada',
+        filename,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            notificationChannelId,
+            notificationChannelName,
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
+        ),
+      );
+
+      print('✅ Servicio: Descarga completada - $filename');
+    } else {
+      throw Exception('El archivo no se guardó correctamente');
+    }
+
+  } catch (e) {
+    print('❌ Servicio: Error detallado - $e');
+    rethrow;
+  }
+}
+
+Future<Directory> _getMusicDirectory() async {
+  Directory? directory;
+  if (Platform.isAndroid) {
+    try {
+      directory = Directory('/storage/emulated/0/Download/Fabichelo');
+      await directory.create(recursive: true);
+    } catch (e) {
+      final appDir = await getApplicationDocumentsDirectory();
+      directory = Directory('${appDir.path}/Fabichelo');
+      await directory.create(recursive: true);
+    }
+  } else {
+    final appDir = await getApplicationDocumentsDirectory();
+    directory = Directory('${appDir.path}/Fabichelo');
+    await directory.create(recursive: true);
+  }
+
+  // Crear archivo .nomedia
+  final nomediaFile = File('${directory.path}/.nomedia');
+  if (!await nomediaFile.exists()) {
+    await nomediaFile.create();
+  }
+
+  return directory;
+}
+
+@pragma('vm:entry-point')
+Future<bool> onIosBackground(ServiceInstance service) async {
+  return true;
 }
 
 class MyApp extends StatelessWidget {
@@ -87,34 +367,13 @@ class MusicService {
       await [
         Permission.storage,
         Permission.manageExternalStorage,
+        Permission.notification,
       ].request();
     }
   }
 
   Future<Directory> getMusicDirectory() async {
-    Directory? directory;
-    if (Platform.isAndroid) {
-      try {
-        directory = Directory('/storage/emulated/0/Download/Fabichelo');
-        await directory.create(recursive: true);
-      } catch (e) {
-        final appDir = await getApplicationDocumentsDirectory();
-        directory = Directory('${appDir.path}/Fabichelo');
-        await directory.create(recursive: true);
-      }
-    } else {
-      final appDir = await getApplicationDocumentsDirectory();
-      directory = Directory('${appDir.path}/Fabichelo');
-      await directory.create(recursive: true);
-    }
-
-    // Crear archivo .nomedia
-    final nomediaFile = File('${directory.path}/.nomedia');
-    if (!await nomediaFile.exists()) {
-      await nomediaFile.create();
-    }
-
-    return directory;
+    return await _getMusicDirectory();
   }
 
   Future<void> loadSongs() async {
@@ -268,132 +527,137 @@ class MusicService {
   }
 }
 
-// Servicio de descarga simplificado
+// Servicio de descarga mejorado con segundo plano
 class DownloadService {
-  static final List<DownloadItem> _downloadQueue = [];
-  static final StreamController<List<DownloadItem>> _downloadsController = 
-      StreamController<List<DownloadItem>>.broadcast();
+  static final Map<String, DownloadItem> _downloads = {};
+  static final StreamController<Map<String, DownloadItem>> _downloadsController = 
+      StreamController<Map<String, DownloadItem>>.broadcast();
   
-  static Stream<List<DownloadItem>> get downloadsStream => _downloadsController.stream;
-  static List<DownloadItem> get downloads => _downloadQueue;
+  static Stream<Map<String, DownloadItem>> get downloadsStream => _downloadsController.stream;
+  static Map<String, DownloadItem> get downloads => _downloads;
+  static List<DownloadItem> get downloadsList => _downloads.values.toList();
+
+  static FlutterBackgroundService? _service;
+  static bool _isInitialized = false;
+
+  static Future<void> initialize() async {
+    if (_isInitialized) return;
+
+    _service = FlutterBackgroundService();
+    if (await _service!.isRunning()) {
+      _setupServiceListeners();
+      _isInitialized = true;
+      print('✅ DownloadService inicializado');
+    }
+  }
+
+  static void _setupServiceListeners() {
+    _service!.on('downloadProgress').listen((event) {
+      final downloadId = event!['downloadId'] as String;
+      final progress = event['progress'] as int;
+      final status = event['status'] as String;
+      final filename = event['filename'] as String;
+
+      _updateDownload(downloadId, 
+        filename: filename,
+        progress: progress,
+        status: _stringToStatus(status)
+      );
+    });
+
+    _service!.on('downloadCompleted').listen((event) {
+      final downloadId = event!['downloadId'] as String;
+      final filename = event['filename'] as String;
+
+      _updateDownload(downloadId,
+        filename: filename,
+        progress: 100,
+        status: DownloadStatus.completed
+      );
+
+      // Actualizar lista de música
+      MusicService().loadSongs();
+    });
+
+    _service!.on('downloadError').listen((event) {
+      final downloadId = event!['downloadId'] as String;
+      final error = event['error'] as String;
+
+      _updateDownload(downloadId,
+        status: DownloadStatus.error,
+        errorMessage: error
+      );
+    });
+  }
+
+  static DownloadStatus _stringToStatus(String status) {
+    switch (status) {
+      case 'preparing': return DownloadStatus.preparing;
+      case 'downloading': return DownloadStatus.downloading;
+      case 'completed': return DownloadStatus.completed;
+      case 'error': return DownloadStatus.error;
+      default: return DownloadStatus.preparing;
+    }
+  }
 
   static Future<void> addDownload(String url) async {
-    if (_downloadQueue.any((item) => item.url == url)) {
-      throw Exception('Esta URL ya está en la cola');
+    await initialize();
+
+    final downloadId = DateTime.now().millisecondsSinceEpoch.toString();
+    
+    if (_downloads.values.any((item) => item.url == url && 
+        (item.status == DownloadStatus.preparing || item.status == DownloadStatus.downloading))) {
+      throw Exception('Esta URL ya se está descargando');
     }
 
     final item = DownloadItem(
+      id: downloadId,
       url: url,
-      filename: 'Obteniendo información...',
+      filename: 'Preparando descarga...',
       progress: 0,
       status: DownloadStatus.preparing,
     );
 
-    _downloadQueue.add(item);
-    _downloadsController.add(_downloadQueue);
+    _downloads[downloadId] = item;
+    _downloadsController.add(_downloads);
 
-    await _processDownload(item);
+    // Enviar al servicio de segundo plano
+    _service!.invoke('startDownload', {
+      'url': url,
+      'downloadId': downloadId,
+    });
+
+    print('🌐 Descarga iniciada en segundo plano: $downloadId');
   }
 
-  static Future<void> _processDownload(DownloadItem item) async {
-    try {
-      print('🌐 Procesando descarga: ${item.url}');
-      
-      // Actualizar estado a descargando
-      _updateDownload(item.url, status: DownloadStatus.downloading);
-
-      // Obtener información del video
-      final response = await http.post(
-        Uri.parse('https://servermusica-1.onrender.com/download'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'url': item.url}),
-      ).timeout(const Duration(minutes: 3)); // Aumentar timeout
-
-      if (response.statusCode != 200) {
-        final error = jsonDecode(response.body)['error'] ?? 'Error del servidor';
-        throw Exception(error);
-      }
-
-      final data = jsonDecode(response.body);
-      final filename = data['file'];
-      final downloadUrl = 'https://servermusica-1.onrender.com/downloads/$filename';
-
-      // Actualizar filename
-      _updateDownload(item.url, filename: filename);
-
-      // Obtener directorio y descargar
-      final musicService = MusicService();
-      final dir = await musicService.getMusicDirectory();
-      final savePath = '${dir.path}/$filename';
-
-      print('📥 Descargando desde: $downloadUrl');
-      
-      // Simular progreso para esta implementación simplificada
-      for (int i = 0; i <= 100; i += 10) {
-        await Future.delayed(const Duration(milliseconds: 200));
-        _updateDownload(item.url, progress: i);
-      }
-
-      // Descargar archivo real
-      final fileResponse = await http.get(Uri.parse(downloadUrl));
-      if (fileResponse.statusCode == 200) {
-        final file = File(savePath);
-        await file.writeAsBytes(fileResponse.bodyBytes);
-        
-        if (await file.exists() && await file.length() > 0) {
-          _updateDownload(item.url, 
-            progress: 100, 
-            status: DownloadStatus.completed
-          );
-          
-          // Actualizar lista de música
-          await musicService.loadSongs();
-          print('✅ Descarga completada: $filename');
-        } else {
-          throw Exception('El archivo no se guardó correctamente');
-        }
-      } else {
-        throw Exception('Error descargando el archivo');
-      }
-
-    } catch (e) {
-      print('❌ Error en descarga: $e');
-      _updateDownload(item.url, 
-        status: DownloadStatus.error, 
-        errorMessage: e.toString()
-      );
-    }
-  }
-
-  static void _updateDownload(String url, {
+  static void _updateDownload(String downloadId, {
     String? filename,
     int? progress,
     DownloadStatus? status,
     String? errorMessage,
   }) {
-    final index = _downloadQueue.indexWhere((item) => item.url == url);
-    if (index != -1) {
-      _downloadQueue[index] = _downloadQueue[index].copyWith(
+    if (_downloads.containsKey(downloadId)) {
+      _downloads[downloadId] = _downloads[downloadId]!.copyWith(
         filename: filename,
         progress: progress,
         status: status,
         errorMessage: errorMessage,
       );
-      _downloadsController.add(_downloadQueue);
+      _downloadsController.add(_downloads);
     }
   }
 
-  static void removeDownload(String url) {
-    _downloadQueue.removeWhere((item) => item.url == url);
-    _downloadsController.add(_downloadQueue);
+  static void removeDownload(String downloadId) {
+    _downloads.remove(downloadId);
+    _downloadsController.add(_downloads);
   }
 
   static void clearCompleted() {
-    _downloadQueue.removeWhere((item) => 
+    _downloads.removeWhere((key, item) => 
       item.status == DownloadStatus.completed || 
       item.status == DownloadStatus.error
     );
-    _downloadsController.add(_downloadQueue);
+    _downloadsController.add(_downloads);
   }
 
   static void dispose() {
@@ -404,6 +668,7 @@ class DownloadService {
 enum DownloadStatus { preparing, downloading, completed, error }
 
 class DownloadItem {
+  final String id;
   final String url;
   final String filename;
   final int progress;
@@ -411,6 +676,7 @@ class DownloadItem {
   final String? errorMessage;
 
   DownloadItem({
+    required this.id,
     required this.url,
     required this.filename,
     required this.progress,
@@ -425,6 +691,7 @@ class DownloadItem {
     String? errorMessage,
   }) {
     return DownloadItem(
+      id: id,
       url: url,
       filename: filename ?? this.filename,
       progress: progress ?? this.progress,
@@ -450,6 +717,7 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
     _musicService.initialize();
+    DownloadService.initialize();
   }
 
   @override
@@ -510,10 +778,50 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
       ),
       child: TabBar(
         controller: _tabController,
-        tabs: const [
-          Tab(icon: Icon(Icons.music_note), text: 'Música'),
-          Tab(icon: Icon(Icons.download), text: 'Descargas'),
-          Tab(icon: Icon(Icons.record_voice_over), text: 'TTS'),
+        tabs: [
+          const Tab(icon: Icon(Icons.music_note), text: 'Música'),
+          Tab(
+            icon: Stack(
+              children: [
+                const Icon(Icons.download),
+                StreamBuilder<Map<String, DownloadItem>>(
+                  stream: DownloadService.downloadsStream,
+                  builder: (context, snapshot) {
+                    final downloads = snapshot.data ?? {};
+                    final activeDownloads = downloads.values.where(
+                      (item) => item.status == DownloadStatus.downloading || 
+                               item.status == DownloadStatus.preparing
+                    ).length;
+                    
+                    if (activeDownloads > 0) {
+                      return Positioned(
+                        right: 0,
+                        top: 0,
+                        child: Container(
+                          padding: const EdgeInsets.all(2),
+                          decoration: const BoxDecoration(
+                            color: Colors.red,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Text(
+                            activeDownloads.toString(),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      );
+                    }
+                    return const SizedBox.shrink();
+                  },
+                ),
+              ],
+            ),
+            text: 'Descargas',
+          ),
+          const Tab(icon: Icon(Icons.record_voice_over), text: 'TTS'),
         ],
         labelColor: Colors.green,
         unselectedLabelColor: Colors.grey,
@@ -602,11 +910,17 @@ class _DownloadsPageState extends State<DownloadsPage> {
                     ElevatedButton.icon(
                       onPressed: _addDownload,
                       icon: const Icon(Icons.add_to_queue),
-                      label: const Text('Agregar a Cola'),
+                      label: const Text('Descargar en Segundo Plano'),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.green,
                         padding: const EdgeInsets.symmetric(vertical: 12),
                       ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'La descarga continuará aunque cierres la app',
+                      style: TextStyle(color: Colors.grey, fontSize: 12),
+                      textAlign: TextAlign.center,
                     ),
                   ],
                 ),
@@ -615,12 +929,13 @@ class _DownloadsPageState extends State<DownloadsPage> {
           ),
           // Lista de descargas
           Expanded(
-            child: StreamBuilder<List<DownloadItem>>(
+            child: StreamBuilder<Map<String, DownloadItem>>(
               stream: DownloadService.downloadsStream,
               builder: (context, snapshot) {
-                final downloads = snapshot.data ?? [];
+                final downloads = snapshot.data ?? {};
+                final downloadsList = downloads.values.toList();
                 
-                if (downloads.isEmpty) {
+                if (downloadsList.isEmpty) {
                   return const Center(
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
@@ -642,12 +957,12 @@ class _DownloadsPageState extends State<DownloadsPage> {
                 }
 
                 return ListView.builder(
-                  itemCount: downloads.length,
+                  itemCount: downloadsList.length,
                   itemBuilder: (context, index) {
-                    final item = downloads[index];
+                    final item = downloadsList[index];
                     return DownloadItemWidget(
                       item: item,
-                      onRemove: () => DownloadService.removeDownload(item.url),
+                      onRemove: () => DownloadService.removeDownload(item.id),
                     );
                   },
                 );
@@ -662,14 +977,14 @@ class _DownloadsPageState extends State<DownloadsPage> {
   Future<void> _addDownload() async {
     final url = _urlController.text.trim();
     if (!url.contains('youtube.com') && !url.contains('youtu.be')) {
-      _showMessage('URL no válida', isError: true);
+      _showMessage('URL no válida. Debe ser un enlace de YouTube', isError: true);
       return;
     }
 
     try {
       await DownloadService.addDownload(url);
       _urlController.clear();
-      _showMessage('Agregado a la cola de descarga');
+      _showMessage('Descarga iniciada en segundo plano');
     } catch (e) {
       _showMessage(e.toString(), isError: true);
     }
@@ -725,6 +1040,7 @@ class DownloadItemWidget extends StatelessWidget {
                   ),
                 ),
                 _buildStatusIcon(),
+                const SizedBox(width: 8),
                 IconButton(
                   icon: const Icon(Icons.delete, color: Colors.red),
                   onPressed: onRemove,
@@ -734,6 +1050,14 @@ class DownloadItemWidget extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             _buildProgressIndicator(),
+            if (item.status == DownloadStatus.downloading ||
+                item.status == DownloadStatus.preparing) ...[
+              const SizedBox(height: 4),
+              const Text(
+                'Descarga en segundo plano activa',
+                style: TextStyle(color: Colors.blue, fontSize: 11),
+              ),
+            ],
           ],
         ),
       ),
@@ -779,7 +1103,7 @@ class DownloadItemWidget extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              '${item.progress}%',
+              '${item.progress}% - Descargando en segundo plano',
               style: const TextStyle(color: Colors.grey, fontSize: 12),
             ),
           ],
@@ -796,7 +1120,7 @@ class DownloadItemWidget extends StatelessWidget {
         );
       case DownloadStatus.preparing:
         return const Text(
-          'Preparando descarga...',
+          'Preparando descarga en segundo plano...',
           style: TextStyle(color: Colors.orange, fontSize: 12),
         );
     }

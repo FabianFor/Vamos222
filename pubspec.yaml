@@ -1,8 +1,8 @@
 name: mi_musica_app
-description: "Aplicación de música optimizada con descarga y texto a voz"
+description: "Aplicación de música optimizada con descarga en segundo plano y texto a voz"
 publish_to: 'none'
 
-version: 1.1.0+2
+version: 1.2.0+3
 
 environment:
   sdk: ^3.8.1
@@ -21,6 +21,10 @@ dependencies:
   
   # HTTP simplificado
   http: ^0.13.6
+  
+  # Servicio de segundo plano y notificaciones
+  flutter_background_service: ^5.0.10
+  flutter_local_notifications: ^17.2.3
   
   # UI
   cupertino_icons: ^1.0.8
