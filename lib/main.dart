@@ -7,14 +7,9 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
-import 'services/background_download_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  // Inicializar servicio de descargas en segundo plano
-  await BackgroundDownloadService.initialize();
-  
   runApp(const MyApp());
 }
 
@@ -41,6 +36,404 @@ class MyApp extends StatelessWidget {
   }
 }
 
+// Singleton para el servicio de música - OPTIMIZACIÓN CLAVE
+class MusicService {
+  static final MusicService _instance = MusicService._internal();
+  factory MusicService() => _instance;
+  MusicService._internal();
+
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  List<File> _songs = [];
+  File? _currentSong;
+  int _currentIndex = 0;
+  bool _isInitialized = false;
+  
+  // StreamControllers optimizados con valores iniciales
+  final _songsController = StreamController<List<File>>.broadcast();
+  final _currentSongController = StreamController<File?>.broadcast();
+  
+  Stream<List<File>> get songsStream => _songsController.stream;
+  Stream<File?> get currentSongStream => _currentSongController.stream;
+  
+  // Métodos para obtener el estado actual inmediatamente
+  List<File> getCurrentSongs() => _songs;
+  File? getCurrentSong() => _currentSong;
+  
+  List<File> get songs => _songs;
+  File? get currentSong => _currentSong;
+  AudioPlayer get audioPlayer => _audioPlayer;
+
+  Future<void> initialize() async {
+    if (_isInitialized) return;
+    
+    print('🎵 Inicializando MusicService...');
+    await _requestPermissions();
+    await loadSongs();
+    _setupAudioPlayer();
+    _isInitialized = true;
+    print('✅ MusicService inicializado');
+  }
+
+  void _setupAudioPlayer() {
+    _audioPlayer.playerStateStream.listen((state) {
+      if (state.processingState == ProcessingState.completed) {
+        playNext();
+      }
+    });
+  }
+
+  Future<void> _requestPermissions() async {
+    if (Platform.isAndroid) {
+      await [
+        Permission.storage,
+        Permission.manageExternalStorage,
+      ].request();
+    }
+  }
+
+  Future<Directory> getMusicDirectory() async {
+    Directory? directory;
+    if (Platform.isAndroid) {
+      try {
+        directory = Directory('/storage/emulated/0/Download/Fabichelo');
+        await directory.create(recursive: true);
+      } catch (e) {
+        final appDir = await getApplicationDocumentsDirectory();
+        directory = Directory('${appDir.path}/Fabichelo');
+        await directory.create(recursive: true);
+      }
+    } else {
+      final appDir = await getApplicationDocumentsDirectory();
+      directory = Directory('${appDir.path}/Fabichelo');
+      await directory.create(recursive: true);
+    }
+
+    // Crear archivo .nomedia
+    final nomediaFile = File('${directory.path}/.nomedia');
+    if (!await nomediaFile.exists()) {
+      await nomediaFile.create();
+    }
+
+    return directory;
+  }
+
+  Future<void> loadSongs() async {
+    try {
+      final musicDir = await getMusicDirectory();
+      
+      if (!await musicDir.exists()) {
+        _songs = [];
+        _songsController.add(_songs);
+        return;
+      }
+      
+      final allFiles = await musicDir.list().toList();
+      final audioFiles = allFiles
+          .where((file) => file is File && _isAudioFile(file.path))
+          .map((file) => File(file.path))
+          .toList();
+      
+      audioFiles.sort((a, b) => a.path.split('/').last.compareTo(b.path.split('/').last));
+      
+      _songs = audioFiles;
+      _songsController.add(_songs);
+      
+      // Actualizar índice si la canción actual ya no existe
+      if (_currentSong != null && !_songs.contains(_currentSong)) {
+        _currentSong = null;
+        _currentSongController.add(null);
+        _currentIndex = 0;
+      }
+      
+      print('🎶 Canciones cargadas: ${_songs.length}');
+      
+    } catch (e) {
+      print('❌ Error cargando canciones: $e');
+      _songs = [];
+      _songsController.add(_songs);
+    }
+  }
+
+  bool _isAudioFile(String path) {
+    final lowerPath = path.toLowerCase();
+    return lowerPath.endsWith('.mp3') ||
+           lowerPath.endsWith('.webm') ||
+           lowerPath.endsWith('.m4a') ||
+           lowerPath.endsWith('.wav') ||
+           lowerPath.endsWith('.aac') ||
+           lowerPath.endsWith('.ogg');
+  }
+
+  Future<void> playSong(File song) async {
+    try {
+      if (!await song.exists()) {
+        print('❌ El archivo no existe: ${song.path}');
+        return;
+      }
+      
+      print('🎵 Reproduciendo: ${getSongName(song)}');
+      
+      // SIEMPRE establecer la canción actual PRIMERO
+      _currentSong = song;
+      _currentIndex = _songs.indexOf(song);
+      
+      // Notificar INMEDIATAMENTE el cambio
+      _currentSongController.add(_currentSong);
+      print('✅ Canción establecida como actual: ${getSongName(song)}');
+      
+      // Si es la misma canción que ya está cargada, solo cambiar play/pause
+      if (_audioPlayer.audioSource != null) {
+        final currentPath = (_audioPlayer.audioSource as UriAudioSource?)?.uri.toFilePath();
+        if (currentPath == song.path) {
+          if (_audioPlayer.playing) {
+            await _audioPlayer.pause();
+            print('⏸️ Pausando canción actual');
+          } else {
+            await _audioPlayer.play();
+            print('▶️ Reanudando canción actual');
+          }
+          return;
+        }
+      }
+      
+      // Cargar y reproducir nueva canción
+      await _audioPlayer.stop();
+      await _audioPlayer.setFilePath(song.path);
+      await _audioPlayer.play();
+      
+      print('🎶 Reproduciendo nueva canción: ${getSongName(song)}');
+      
+    } catch (e) {
+      print('❌ Error reproduciendo canción: $e');
+      // En caso de error, mantener la canción como actual para que aparezca el mini player
+      if (_currentSong == null) {
+        _currentSong = song;
+        _currentSongController.add(_currentSong);
+      }
+    }
+  }
+
+  String getSongName(File song) {
+    return song.path.split('/').last
+        .replaceAll(RegExp(r'\.(mp3|webm|m4a|wav|aac|ogg)$', caseSensitive: false), '');
+  }
+
+  Future<void> pauseResume() async {
+    try {
+      if (_audioPlayer.playing) {
+        await _audioPlayer.pause();
+      } else {
+        await _audioPlayer.play();
+      }
+    } catch (e) {
+      print('❌ Error en pauseResume: $e');
+    }
+  }
+
+  Future<void> playNext() async {
+    if (_songs.isNotEmpty) {
+      _currentIndex = (_currentIndex + 1) % _songs.length;
+      await playSong(_songs[_currentIndex]);
+    }
+  }
+
+  Future<void> playPrevious() async {
+    if (_songs.isNotEmpty) {
+      _currentIndex = _currentIndex > 0 ? _currentIndex - 1 : _songs.length - 1;
+      await playSong(_songs[_currentIndex]);
+    }
+  }
+
+  Future<void> deleteSong(File song) async {
+    try {
+      if (_currentSong == song) {
+        await _audioPlayer.stop();
+        _currentSong = null;
+        _currentSongController.add(null);
+      }
+      
+      await song.delete();
+      await loadSongs();
+      
+    } catch (e) {
+      print('❌ Error eliminando canción: $e');
+    }
+  }
+
+  void dispose() {
+    _audioPlayer.dispose();
+    _songsController.close();
+    _currentSongController.close();
+    _isInitialized = false;
+  }
+}
+
+// Servicio de descarga simplificado
+class DownloadService {
+  static final List<DownloadItem> _downloadQueue = [];
+  static final StreamController<List<DownloadItem>> _downloadsController = 
+      StreamController<List<DownloadItem>>.broadcast();
+  
+  static Stream<List<DownloadItem>> get downloadsStream => _downloadsController.stream;
+  static List<DownloadItem> get downloads => _downloadQueue;
+
+  static Future<void> addDownload(String url) async {
+    if (_downloadQueue.any((item) => item.url == url)) {
+      throw Exception('Esta URL ya está en la cola');
+    }
+
+    final item = DownloadItem(
+      url: url,
+      filename: 'Obteniendo información...',
+      progress: 0,
+      status: DownloadStatus.preparing,
+    );
+
+    _downloadQueue.add(item);
+    _downloadsController.add(_downloadQueue);
+
+    await _processDownload(item);
+  }
+
+  static Future<void> _processDownload(DownloadItem item) async {
+    try {
+      print('🌐 Procesando descarga: ${item.url}');
+      
+      // Actualizar estado a descargando
+      _updateDownload(item.url, status: DownloadStatus.downloading);
+
+      // Obtener información del video
+      final response = await http.post(
+        Uri.parse('https://servermusica-1.onrender.com/download'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'url': item.url}),
+      ).timeout(const Duration(minutes: 3)); // Aumentar timeout
+
+      if (response.statusCode != 200) {
+        final error = jsonDecode(response.body)['error'] ?? 'Error del servidor';
+        throw Exception(error);
+      }
+
+      final data = jsonDecode(response.body);
+      final filename = data['file'];
+      final downloadUrl = 'https://servermusica-1.onrender.com/downloads/$filename';
+
+      // Actualizar filename
+      _updateDownload(item.url, filename: filename);
+
+      // Obtener directorio y descargar
+      final musicService = MusicService();
+      final dir = await musicService.getMusicDirectory();
+      final savePath = '${dir.path}/$filename';
+
+      print('📥 Descargando desde: $downloadUrl');
+      
+      // Simular progreso para esta implementación simplificada
+      for (int i = 0; i <= 100; i += 10) {
+        await Future.delayed(const Duration(milliseconds: 200));
+        _updateDownload(item.url, progress: i);
+      }
+
+      // Descargar archivo real
+      final fileResponse = await http.get(Uri.parse(downloadUrl));
+      if (fileResponse.statusCode == 200) {
+        final file = File(savePath);
+        await file.writeAsBytes(fileResponse.bodyBytes);
+        
+        if (await file.exists() && await file.length() > 0) {
+          _updateDownload(item.url, 
+            progress: 100, 
+            status: DownloadStatus.completed
+          );
+          
+          // Actualizar lista de música
+          await musicService.loadSongs();
+          print('✅ Descarga completada: $filename');
+        } else {
+          throw Exception('El archivo no se guardó correctamente');
+        }
+      } else {
+        throw Exception('Error descargando el archivo');
+      }
+
+    } catch (e) {
+      print('❌ Error en descarga: $e');
+      _updateDownload(item.url, 
+        status: DownloadStatus.error, 
+        errorMessage: e.toString()
+      );
+    }
+  }
+
+  static void _updateDownload(String url, {
+    String? filename,
+    int? progress,
+    DownloadStatus? status,
+    String? errorMessage,
+  }) {
+    final index = _downloadQueue.indexWhere((item) => item.url == url);
+    if (index != -1) {
+      _downloadQueue[index] = _downloadQueue[index].copyWith(
+        filename: filename,
+        progress: progress,
+        status: status,
+        errorMessage: errorMessage,
+      );
+      _downloadsController.add(_downloadQueue);
+    }
+  }
+
+  static void removeDownload(String url) {
+    _downloadQueue.removeWhere((item) => item.url == url);
+    _downloadsController.add(_downloadQueue);
+  }
+
+  static void clearCompleted() {
+    _downloadQueue.removeWhere((item) => 
+      item.status == DownloadStatus.completed || 
+      item.status == DownloadStatus.error
+    );
+    _downloadsController.add(_downloadQueue);
+  }
+
+  static void dispose() {
+    _downloadsController.close();
+  }
+}
+
+enum DownloadStatus { preparing, downloading, completed, error }
+
+class DownloadItem {
+  final String url;
+  final String filename;
+  final int progress;
+  final DownloadStatus status;
+  final String? errorMessage;
+
+  DownloadItem({
+    required this.url,
+    required this.filename,
+    required this.progress,
+    required this.status,
+    this.errorMessage,
+  });
+
+  DownloadItem copyWith({
+    String? filename,
+    int? progress,
+    DownloadStatus? status,
+    String? errorMessage,
+  }) {
+    return DownloadItem(
+      url: url,
+      filename: filename ?? this.filename,
+      progress: progress ?? this.progress,
+      status: status ?? this.status,
+      errorMessage: errorMessage ?? this.errorMessage,
+    );
+  }
+}
+
 class MainPage extends StatefulWidget {
   const MainPage({Key? key}) : super(key: key);
 
@@ -55,15 +448,13 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this); // Agregamos una pestaña más
+    _tabController = TabController(length: 3, vsync: this);
     _musicService.initialize();
   }
 
   @override
   void dispose() {
     _tabController.dispose();
-    _musicService.dispose();
-    BackgroundDownloadService.dispose();
     super.dispose();
   }
 
@@ -77,17 +468,18 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
               controller: _tabController,
               children: [
                 MusicPage(musicService: _musicService),
-                const DownloadsPage(), // Nueva página de descargas
+                const DownloadsPage(),
                 const TtsPage(),
               ],
             ),
           ),
-          // Mini Player - SIEMPRE escucha el stream
+          // Mini Player
           StreamBuilder<File?>(
             stream: _musicService.currentSongStream,
+            initialData: _musicService.getCurrentSong(), // Datos inmediatos
             builder: (context, snapshot) {
-              final currentSong = snapshot.data;
-              print('🎵 Mini Player - Current song: ${currentSong?.path}'); // Debug
+              final currentSong = snapshot.data ?? _musicService.getCurrentSong();
+              print('🎵 MainPage - MiniPlayer - Canción: ${currentSong?.path}');
               
               if (currentSong != null) {
                 return MiniPlayer(
@@ -131,9 +523,10 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
   }
 
   void _navigateToFullPlayer() {
-    // Verificar que hay una canción actual antes de navegar
-    if (_musicService.currentSong != null) {
-      print('🎵 Navegando a reproductor completo con: ${_musicService.currentSong!.path}');
+    final currentSong = _musicService.getCurrentSong();
+    print('🎵 Navegando a FullPlayer con canción: ${currentSong?.path}');
+    
+    if (currentSong != null) {
       Navigator.push(
         context,
         MaterialPageRoute(
@@ -141,7 +534,7 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
         ),
       );
     } else {
-      print('⚠️ No hay canción actual para mostrar en reproductor completo');
+      print('⚠️ No hay canción actual para mostrar');
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('No hay canción reproduciéndose'),
@@ -152,7 +545,6 @@ class _MainPageState extends State<MainPage> with TickerProviderStateMixin {
   }
 }
 
-// Nueva página de descargas
 class DownloadsPage extends StatefulWidget {
   const DownloadsPage({Key? key}) : super(key: key);
 
@@ -162,37 +554,6 @@ class DownloadsPage extends StatefulWidget {
 
 class _DownloadsPageState extends State<DownloadsPage> {
   final TextEditingController _urlController = TextEditingController();
-  final List<DownloadItem> _downloadQueue = [];
-  final MusicService _musicService = MusicService();
-
-  @override
-  void initState() {
-    super.initState();
-    _musicService.initialize();
-    _listenToDownloadProgress();
-  }
-
-  void _listenToDownloadProgress() {
-    BackgroundDownloadService.progressStream.listen((progress) {
-      setState(() {
-        // Actualizar el progreso en la cola
-        final index = _downloadQueue.indexWhere((item) => item.url == progress.url);
-        if (index != -1) {
-          _downloadQueue[index] = _downloadQueue[index].copyWith(
-            progress: progress.progress,
-            isCompleted: progress.isCompleted,
-            isError: progress.isError,
-            errorMessage: progress.errorMessage,
-          );
-          
-          // Si la descarga se completó, recargar la lista de música
-          if (progress.isCompleted) {
-            _musicService.loadSongs();
-          }
-        }
-      });
-    });
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -204,7 +565,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
         actions: [
           IconButton(
             icon: const Icon(Icons.clear_all),
-            onPressed: _clearCompleted,
+            onPressed: () => DownloadService.clearCompleted(),
             tooltip: 'Limpiar completadas',
           ),
         ],
@@ -254,8 +615,13 @@ class _DownloadsPageState extends State<DownloadsPage> {
           ),
           // Lista de descargas
           Expanded(
-            child: _downloadQueue.isEmpty
-                ? const Center(
+            child: StreamBuilder<List<DownloadItem>>(
+              stream: DownloadService.downloadsStream,
+              builder: (context, snapshot) {
+                final downloads = snapshot.data ?? [];
+                
+                if (downloads.isEmpty) {
+                  return const Center(
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
@@ -272,18 +638,21 @@ class _DownloadsPageState extends State<DownloadsPage> {
                         ),
                       ],
                     ),
-                  )
-                : ListView.builder(
-                    itemCount: _downloadQueue.length,
-                    itemBuilder: (context, index) {
-                      final item = _downloadQueue[index];
-                      return DownloadItemWidget(
-                        item: item,
-                        onCancel: () => _cancelDownload(item),
-                        onRemove: () => _removeDownload(item),
-                      );
-                    },
-                  ),
+                  );
+                }
+
+                return ListView.builder(
+                  itemCount: downloads.length,
+                  itemBuilder: (context, index) {
+                    final item = downloads[index];
+                    return DownloadItemWidget(
+                      item: item,
+                      onRemove: () => DownloadService.removeDownload(item.url),
+                    );
+                  },
+                );
+              },
+            ),
           ),
         ],
       ),
@@ -297,104 +666,13 @@ class _DownloadsPageState extends State<DownloadsPage> {
       return;
     }
 
-    // Verificar si ya está en la cola
-    if (_downloadQueue.any((item) => item.url == url)) {
-      _showMessage('Esta URL ya está en la cola', isError: true);
-      return;
-    }
-
-    setState(() {
-      _downloadQueue.add(DownloadItem(
-        url: url,
-        filename: 'Obteniendo información...',
-        progress: 0,
-        isCompleted: false,
-        isError: false,
-      ));
-    });
-
-    _urlController.clear();
-    _showMessage('Agregado a la cola de descarga');
-
-    // Procesar la descarga
-    _processDownload(url);
-  }
-
-  Future<void> _processDownload(String url) async {
     try {
-      print('🌐 Obteniendo información del video...');
-      final response = await http.post(
-        Uri.parse('https://servermusica-1.onrender.com/download'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'url': url}),
-      ).timeout(const Duration(minutes: 2));
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final filename = data['file'];
-        final downloadUrl = 'https://servermusica-1.onrender.com/downloads/$filename';
-
-        // Actualizar información del archivo
-        setState(() {
-          final index = _downloadQueue.indexWhere((item) => item.url == url);
-          if (index != -1) {
-            _downloadQueue[index] = _downloadQueue[index].copyWith(filename: filename);
-          }
-        });
-
-        // Obtener directorio de destino
-        final dir = await _musicService.getMusicDirectory();
-        final savePath = '${dir.path}/$filename';
-
-        // Iniciar descarga en segundo plano
-        await BackgroundDownloadService.startDownload(
-          url: url,
-          filename: filename,
-          downloadUrl: downloadUrl,
-          savePath: savePath,
-        );
-
-      } else {
-        final error = jsonDecode(response.body)['error'] ?? 'Error desconocido';
-        setState(() {
-          final index = _downloadQueue.indexWhere((item) => item.url == url);
-          if (index != -1) {
-            _downloadQueue[index] = _downloadQueue[index].copyWith(
-              isError: true,
-              errorMessage: error,
-            );
-          }
-        });
-      }
+      await DownloadService.addDownload(url);
+      _urlController.clear();
+      _showMessage('Agregado a la cola de descarga');
     } catch (e) {
-      setState(() {
-        final index = _downloadQueue.indexWhere((item) => item.url == url);
-        if (index != -1) {
-          _downloadQueue[index] = _downloadQueue[index].copyWith(
-            isError: true,
-            errorMessage: e.toString(),
-          );
-        }
-      });
+      _showMessage(e.toString(), isError: true);
     }
-  }
-
-  void _cancelDownload(DownloadItem item) {
-    if (!item.isCompleted && !item.isError) {
-      BackgroundDownloadService.cancelDownload(item.url);
-    }
-  }
-
-  void _removeDownload(DownloadItem item) {
-    setState(() {
-      _downloadQueue.removeWhere((download) => download.url == item.url);
-    });
-  }
-
-  void _clearCompleted() {
-    setState(() {
-      _downloadQueue.removeWhere((item) => item.isCompleted || item.isError);
-    });
   }
 
   void _showMessage(String message, {bool isError = false}) {
@@ -410,21 +688,17 @@ class _DownloadsPageState extends State<DownloadsPage> {
   @override
   void dispose() {
     _urlController.dispose();
-    _musicService.dispose();
     super.dispose();
   }
 }
 
-// Widget para mostrar cada item de descarga
 class DownloadItemWidget extends StatelessWidget {
   final DownloadItem item;
-  final VoidCallback onCancel;
   final VoidCallback onRemove;
 
   const DownloadItemWidget({
     Key? key,
     required this.item,
-    required this.onCancel,
     required this.onRemove,
   }) : super(key: key);
 
@@ -450,16 +724,7 @@ class DownloadItemWidget extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                if (item.isCompleted)
-                  const Icon(Icons.check_circle, color: Colors.green)
-                else if (item.isError)
-                  const Icon(Icons.error, color: Colors.red)
-                else
-                  IconButton(
-                    icon: const Icon(Icons.close, color: Colors.grey),
-                    onPressed: onCancel,
-                    tooltip: 'Cancelar',
-                  ),
+                _buildStatusIcon(),
                 IconButton(
                   icon: const Icon(Icons.delete, color: Colors.red),
                   onPressed: onRemove,
@@ -468,417 +733,76 @@ class DownloadItemWidget extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 8),
-            if (!item.isError && !item.isCompleted) ...[
-              LinearProgressIndicator(
-                value: item.progress / 100,
-                backgroundColor: Colors.grey[700],
-                valueColor: const AlwaysStoppedAnimation<Color>(Colors.green),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                '${item.progress}%',
-                style: const TextStyle(color: Colors.grey, fontSize: 12),
-              ),
-            ] else if (item.isError) ...[
-              Text(
-                'Error: ${item.errorMessage ?? "Error desconocido"}',
-                style: const TextStyle(color: Colors.red, fontSize: 12),
-              ),
-            ] else if (item.isCompleted) ...[
-              const Text(
-                'Descarga completada ✓',
-                style: TextStyle(color: Colors.green, fontSize: 12),
-              ),
-            ],
+            _buildProgressIndicator(),
           ],
         ),
       ),
     );
   }
-}
 
-// Clase para representar un item de descarga
-class DownloadItem {
-  final String url;
-  final String filename;
-  final int progress;
-  final bool isCompleted;
-  final bool isError;
-  final String? errorMessage;
-
-  DownloadItem({
-    required this.url,
-    required this.filename,
-    required this.progress,
-    required this.isCompleted,
-    required this.isError,
-    this.errorMessage,
-  });
-
-  DownloadItem copyWith({
-    String? filename,
-    int? progress,
-    bool? isCompleted,
-    bool? isError,
-    String? errorMessage,
-  }) {
-    return DownloadItem(
-      url: url,
-      filename: filename ?? this.filename,
-      progress: progress ?? this.progress,
-      isCompleted: isCompleted ?? this.isCompleted,
-      isError: isError ?? this.isError,
-      errorMessage: errorMessage ?? this.errorMessage,
-    );
-  }
-}
-
-// Servicio de música corregido
-class MusicService {
-  final AudioPlayer _audioPlayer = AudioPlayer();
-  List<File> _songs = [];
-  File? _currentSong;
-  int _currentIndex = 0;
-  
-  // StreamControllers con mejor manejo
-  final _songsController = StreamController<List<File>>.broadcast();
-  final _currentSongController = StreamController<File?>.broadcast();
-  
-  Stream<List<File>> get songsStream => _songsController.stream;
-  Stream<File?> get currentSongStream => _currentSongController.stream;
-  
-  // Getter sincronizado para hasCurrentSong
-  Stream<bool> get hasCurrentSongStream => 
-      _currentSongController.stream.map((song) => song != null);
-  
-  List<File> get songs => _songs;
-  File? get currentSong => _currentSong;
-  AudioPlayer get audioPlayer => _audioPlayer;
-
-  void initialize() {
-    _requestPermissions();
-    loadSongs();
-    _setupAudioPlayer();
-  }
-
-  void _setupAudioPlayer() {
-    _audioPlayer.playerStateStream.listen((state) {
-      print('🎵 Estado del reproductor: ${state.processingState}');
-      if (state.processingState == ProcessingState.completed) {
-        playNext();
-      }
-    });
-    
-    // Escuchar cuando el audio se carga exitosamente
-    _audioPlayer.durationStream.listen((duration) {
-      if (duration != null && _currentSong != null) {
-        print('🎶 Audio cargado correctamente: ${getSongName(_currentSong!)}');
-        // Re-notificar que tenemos una canción actual
-        _currentSongController.add(_currentSong);
-      }
-    });
-  }
-
-  Future<void> _requestPermissions() async {
-    print('🔐 Solicitando permisos...');
-    
-    if (Platform.isAndroid) {
-      // Para Android 13+ (API 33+)
-      Map<Permission, PermissionStatus> statuses = await [
-        Permission.storage,
-        Permission.manageExternalStorage,
-        Permission.notification,
-      ].request();
-      
-      print('📱 Estado de permisos:');
-      statuses.forEach((permission, status) {
-        print('   ${permission.toString()}: ${status.toString()}');
-      });
-      
-      // Si no tenemos permisos, mostrar mensaje al usuario
-      if (statuses[Permission.storage] != PermissionStatus.granted &&
-          statuses[Permission.manageExternalStorage] != PermissionStatus.granted) {
-        print('❌ Sin permisos de almacenamiento');
-      } else {
-        print('✅ Permisos de almacenamiento concedidos');
-      }
+  Widget _buildStatusIcon() {
+    switch (item.status) {
+      case DownloadStatus.completed:
+        return const Icon(Icons.check_circle, color: Colors.green);
+      case DownloadStatus.error:
+        return const Icon(Icons.error, color: Colors.red);
+      case DownloadStatus.downloading:
+        return const SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            valueColor: AlwaysStoppedAnimation<Color>(Colors.green),
+          ),
+        );
+      case DownloadStatus.preparing:
+        return const SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            valueColor: AlwaysStoppedAnimation<Color>(Colors.orange),
+          ),
+        );
     }
   }
 
-  Future<Directory> getMusicDirectory() async {
-    print('📁 Obteniendo directorio de música...');
-    
-    Directory? directory;
-    if (Platform.isAndroid) {
-      // Intentar múltiples rutas
-      List<String> possiblePaths = [
-        '/storage/emulated/0/Download/Fabichelo',
-        '/storage/emulated/0/Music/Fabichelo',
-        '/storage/emulated/0/Documents/Fabichelo',
-      ];
-      
-      for (String path in possiblePaths) {
-        try {
-          directory = Directory(path);
-          await directory.create(recursive: true);
-          print('✅ Directorio creado en: $path');
-          break;
-        } catch (e) {
-          print('❌ No se pudo crear directorio en: $path - Error: $e');
-          continue;
-        }
-      }
-      
-      // Si ninguna ruta funciona, usar el directorio de la app
-      if (directory == null || !await directory.exists()) {
-        final appDir = await getApplicationDocumentsDirectory();
-        directory = Directory('${appDir.path}/Fabichelo');
-        print('📱 Usando directorio de la app: ${directory.path}');
-      }
-    } else {
-      final appDir = await getApplicationDocumentsDirectory();
-      directory = Directory('${appDir.path}/Fabichelo');
+  Widget _buildProgressIndicator() {
+    switch (item.status) {
+      case DownloadStatus.downloading:
+        return Column(
+          children: [
+            LinearProgressIndicator(
+              value: item.progress / 100,
+              backgroundColor: Colors.grey[700],
+              valueColor: const AlwaysStoppedAnimation<Color>(Colors.green),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '${item.progress}%',
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+          ],
+        );
+      case DownloadStatus.error:
+        return Text(
+          'Error: ${item.errorMessage ?? "Error desconocido"}',
+          style: const TextStyle(color: Colors.red, fontSize: 12),
+        );
+      case DownloadStatus.completed:
+        return const Text(
+          'Descarga completada ✓',
+          style: TextStyle(color: Colors.green, fontSize: 12),
+        );
+      case DownloadStatus.preparing:
+        return const Text(
+          'Preparando descarga...',
+          style: TextStyle(color: Colors.orange, fontSize: 12),
+        );
     }
-
-    // Crear el directorio si no existe
-    if (!await directory.exists()) {
-      await directory.create(recursive: true);
-      print('📁 Directorio creado: ${directory.path}');
-    }
-
-    // Crear archivo .nomedia para evitar que aparezca en la galería
-    final nomediaFile = File('${directory.path}/.nomedia');
-    if (!await nomediaFile.exists()) {
-      await nomediaFile.create();
-      print('🚫 Archivo .nomedia creado');
-    }
-
-    print('📂 Directorio final: ${directory.path}');
-    return directory;
-  }
-
-  Future<void> loadSongs() async {
-    print('🎵 Cargando canciones...');
-    try {
-      final musicDir = await getMusicDirectory();
-      print('📁 Buscando archivos en: ${musicDir.path}');
-      
-      // Verificar si el directorio existe
-      if (!await musicDir.exists()) {
-        print('❌ El directorio no existe');
-        _songs = [];
-        _songsController.add(_songs);
-        return;
-      }
-      
-      // Listar todos los archivos
-      final allFiles = await musicDir.list().toList();
-      print('📂 Total de archivos encontrados: ${allFiles.length}');
-      
-      // Filtrar solo archivos de audio
-      final audioFiles = allFiles
-          .where((file) => file is File && _isAudioFile(file.path))
-          .map((file) => File(file.path))
-          .toList();
-      
-      // Ordenar por nombre
-      audioFiles.sort((a, b) => a.path.split('/').last.compareTo(b.path.split('/').last));
-      
-      print('🎶 Archivos de audio encontrados: ${audioFiles.length}');
-      audioFiles.forEach((file) {
-        print('   - ${file.path.split('/').last}');
-      });
-      
-      _songs = audioFiles;
-      _songsController.add(_songs);
-      
-      // Actualizar índice si la canción actual ya no existe
-      if (_currentSong != null && !_songs.contains(_currentSong)) {
-        print('⚠️ Canción actual eliminada, limpiando...');
-        _currentSong = null;
-        _currentSongController.add(null);
-        _currentIndex = 0;
-      }
-      
-    } catch (e) {
-      print('❌ Error cargando canciones: $e');
-      _songs = [];
-      _songsController.add(_songs);
-    }
-  }
-
-  bool _isAudioFile(String path) {
-    final lowerPath = path.toLowerCase();
-    return lowerPath.endsWith('.mp3') ||
-           lowerPath.endsWith('.webm') ||
-           lowerPath.endsWith('.m4a') ||
-           lowerPath.endsWith('.wav') ||
-           lowerPath.endsWith('.aac') ||
-           lowerPath.endsWith('.ogg') ||
-           lowerPath.endsWith('.flac');
-  }
-
-  Future<void> playSong(File song) async {
-    try {
-      print('🎵 Intentando reproducir: ${song.path}');
-      
-      // Verificar que el archivo existe
-      if (!await song.exists()) {
-        print('❌ El archivo no existe: ${song.path}');
-        return;
-      }
-      
-      // Si es la misma canción y está reproduciendo, pausar/reanudar
-      if (_currentSong?.path == song.path && _audioPlayer.playing) {
-        await _audioPlayer.pause();
-        print('⏸️ Pausando canción actual');
-        return;
-      }
-      
-      // Si es la misma canción pero está pausada, reanudar
-      if (_currentSong?.path == song.path && !_audioPlayer.playing) {
-        await _audioPlayer.play();
-        print('▶️ Reanudando canción actual');
-        return;
-      }
-      
-      // DETENER cualquier reproducción actual
-      await _audioPlayer.stop();
-      
-      // Establecer nueva canción ANTES de cualquier operación
-      _currentSong = song;
-      _currentIndex = _songs.indexOf(song);
-      
-      // Notificar INMEDIATAMENTE el cambio
-      _currentSongController.add(_currentSong);
-      print('✅ Canción actual establecida: ${getSongName(song)}');
-      
-      // Configurar y reproducir audio
-      await _audioPlayer.setFilePath(song.path);
-      await _audioPlayer.play();
-      
-      print('🎶 Reproduciendo: ${getSongName(song)}');
-      
-    } catch (e) {
-      print('❌ Error reproduciendo canción: $e');
-      // En caso de error, limpiar estado
-      _currentSong = null;
-      _currentSongController.add(null);
-    }
-  }
-
-  String getSongName(File song) {
-    return song.path.split('/').last
-        .replaceAll(RegExp(r'\.(mp3|webm|m4a|wav|aac|ogg|flac)$', caseSensitive: false), '');
-  }
-
-  Future<void> pauseResume() async {
-    try {
-      if (_audioPlayer.playing) {
-        await _audioPlayer.pause();
-      } else {
-        await _audioPlayer.play();
-      }
-    } catch (e) {
-      print('❌ Error en pauseResume: $e');
-    }
-  }
-
-  Future<void> playNext() async {
-    if (_songs.isNotEmpty) {
-      _currentIndex = (_currentIndex + 1) % _songs.length;
-      final nextSong = _songs[_currentIndex];
-      
-      print('🎵 Cambiando a siguiente canción: ${getSongName(nextSong)}');
-      
-      try {
-        // Verificar que el archivo existe
-        if (!await nextSong.exists()) {
-          print('❌ El archivo no existe: ${nextSong.path}');
-          return;
-        }
-        
-        // DETENER música actual
-        await _audioPlayer.stop();
-        
-        // Establecer nueva canción INMEDIATAMENTE
-        _currentSong = nextSong;
-        _currentSongController.add(_currentSong);
-        
-        // Configurar y reproducir SIN pausa
-        await _audioPlayer.setFilePath(nextSong.path);
-        await _audioPlayer.play();
-        
-        print('✅ Reproduciendo siguiente: ${getSongName(nextSong)}');
-        
-      } catch (e) {
-        print('❌ Error cambiando a siguiente canción: $e');
-      }
-    }
-  }
-
-  Future<void> playPrevious() async {
-    if (_songs.isNotEmpty) {
-      _currentIndex = _currentIndex > 0 ? _currentIndex - 1 : _songs.length - 1;
-      final previousSong = _songs[_currentIndex];
-      
-      print('🎵 Cambiando a canción anterior: ${getSongName(previousSong)}');
-      
-      try {
-        // Verificar que el archivo existe
-        if (!await previousSong.exists()) {
-          print('❌ El archivo no existe: ${previousSong.path}');
-          return;
-        }
-        
-        // DETENER música actual
-        await _audioPlayer.stop();
-        
-        // Establecer nueva canción INMEDIATAMENTE
-        _currentSong = previousSong;
-        _currentSongController.add(_currentSong);
-        
-        // Configurar y reproducir SIN pausa
-        await _audioPlayer.setFilePath(previousSong.path);
-        await _audioPlayer.play();
-        
-        print('✅ Reproduciendo anterior: ${getSongName(previousSong)}');
-        
-      } catch (e) {
-        print('❌ Error cambiando a canción anterior: $e');
-      }
-    }
-  }
-
-  Future<void> deleteSong(File song) async {
-    try {
-      // Si es la canción actual, detener reproducción
-      if (_currentSong == song) {
-        await _audioPlayer.stop();
-        _currentSong = null;
-        _currentSongController.add(null);
-      }
-      
-      // Eliminar archivo
-      await song.delete();
-      print('🗑️ Archivo eliminado: ${song.path}');
-      
-      // Recargar lista
-      await loadSongs();
-      
-    } catch (e) {
-      print('❌ Error eliminando canción: $e');
-    }
-  }
-
-  void dispose() {
-    _audioPlayer.dispose();
-    _songsController.close();
-    _currentSongController.close();
   }
 }
 
-// Mini reproductor con mejor detección
 class MiniPlayer extends StatelessWidget {
   final MusicService musicService;
   final VoidCallback onTap;
@@ -891,36 +815,31 @@ class MiniPlayer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<File?>(
-      stream: musicService.currentSongStream,
-      builder: (context, snapshot) {
-        final currentSong = snapshot.data;
-        print('🎵 MiniPlayer render - Current song: ${currentSong?.path}'); // Debug
-        
-        // Si no hay canción, no mostrar nada
-        if (currentSong == null) {
-          print('🎵 MiniPlayer - No hay canción, ocultando');
-          return const SizedBox.shrink();
-        }
-        
-        return GestureDetector(
-          onTap: () {
-            print('🎵 MiniPlayer tocado - navegando a reproductor completo');
-            onTap();
-          },
-          child: Container(
-            height: 70,
-            decoration: const BoxDecoration(
-              color: Color(0xFF161B22),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black26,
-                  blurRadius: 8,
-                  offset: Offset(0, -2),
-                ),
-              ],
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        height: 70,
+        decoration: const BoxDecoration(
+          color: Color(0xFF161B22),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black26,
+              blurRadius: 8,
+              offset: Offset(0, -2),
             ),
-            child: Row(
+          ],
+        ),
+        child: StreamBuilder<File?>(
+          stream: musicService.currentSongStream,
+          initialData: musicService.getCurrentSong(), // Datos inmediatos
+          builder: (context, snapshot) {
+            final currentSong = snapshot.data ?? musicService.getCurrentSong();
+            
+            print('🎵 MiniPlayer - Canción actual: ${currentSong?.path}');
+            
+            if (currentSong == null) return const SizedBox.shrink();
+            
+            return Row(
               children: [
                 Container(
                   width: 50,
@@ -959,10 +878,7 @@ class MiniPlayer extends StatelessWidget {
                   builder: (context, snapshot) {
                     final isPlaying = snapshot.data ?? false;
                     return IconButton(
-                      onPressed: () {
-                        print('🎵 MiniPlayer - botón play/pause presionado');
-                        musicService.pauseResume();
-                      },
+                      onPressed: musicService.pauseResume,
                       icon: Icon(
                         isPlaying ? Icons.pause : Icons.play_arrow,
                         color: Colors.white,
@@ -972,68 +888,18 @@ class MiniPlayer extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
               ],
-            ),
-          ),
-        );
-      },
+            );
+          },
+        ),
+      ),
     );
   }
 }
 
-// Página de música simplificada (sin sección de descarga)
 class MusicPage extends StatelessWidget {
   final MusicService musicService;
 
   const MusicPage({Key? key, required this.musicService}) : super(key: key);
-
-  void _showPermissionsDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF21262D),
-        title: const Text('Información de Permisos', style: TextStyle(color: Colors.white)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Para descargar música necesitas:',
-              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              '• Acceso a almacenamiento\n• Permisos de escritura\n• Conexión a internet',
-              style: TextStyle(color: Colors.grey),
-            ),
-            const SizedBox(height: 15),
-            const Text(
-              'Si las descargas no funcionan:',
-              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 5),
-            const Text(
-              '1. Ve a Configuración > Aplicaciones > Fabichelo\n2. Permite "Administrar archivos"\n3. Reinicia la app',
-              style: TextStyle(color: Colors.grey),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () async {
-              Navigator.pop(context);
-              await musicService._requestPermissions();
-              await musicService.getMusicDirectory();
-            },
-            child: const Text('Verificar Permisos', style: TextStyle(color: Colors.green)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cerrar', style: TextStyle(color: Colors.grey)),
-          ),
-        ],
-      ),
-    );
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -1048,107 +914,82 @@ class MusicPage extends StatelessWidget {
             onPressed: () => musicService.loadSongs(),
             tooltip: 'Actualizar lista',
           ),
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: () => _showPermissionsDialog(context),
-          ),
-          IconButton(
-            icon: const Icon(Icons.folder),
-            onPressed: () async {
-              final dir = await musicService.getMusicDirectory();
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text('Ruta: ${dir.path}'),
-                  backgroundColor: Colors.green,
-                  duration: const Duration(seconds: 4),
-                ),
-              );
-            },
-          ),
         ],
       ),
-      body: SongsList(musicService: musicService),
-    );
-  }
-}
-
-// Lista de canciones corregida
-class SongsList extends StatelessWidget {
-  final MusicService musicService;
-
-  const SongsList({Key? key, required this.musicService}) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    return StreamBuilder<List<File>>(
-      stream: musicService.songsStream,
-      builder: (context, snapshot) {
-        final songs = snapshot.data ?? [];
-        
-        if (songs.isEmpty) {
-          return const Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.music_off, size: 64, color: Colors.grey),
-                SizedBox(height: 16),
-                Text(
-                  'No hay canciones',
-                  style: TextStyle(color: Colors.grey, fontSize: 18),
-                ),
-                SizedBox(height: 8),
-                Text(
-                  'Ve a la pestaña "Descargas" para\nagregar música desde YouTube',
-                  style: TextStyle(color: Colors.grey),
-                  textAlign: TextAlign.center,
-                ),
-              ],
-            ),
-          );
-        }
-
-        return ListView.builder(
-          itemCount: songs.length,
-          itemBuilder: (context, index) {
-            final song = songs[index];
-            return StreamBuilder<File?>(
-              stream: musicService.currentSongStream,
-              builder: (context, currentSnapshot) {
-                final isCurrent = currentSnapshot.data?.path == song.path;
-                final songName = musicService.getSongName(song);
-
-                return ListTile(
-                  tileColor: isCurrent ? Colors.green.withOpacity(0.1) : null,
-                  leading: Icon(
-                    isCurrent ? Icons.volume_up : Icons.music_note,
-                    color: isCurrent ? Colors.green : Colors.white,
+      body: StreamBuilder<List<File>>(
+        stream: musicService.songsStream,
+        initialData: musicService.getCurrentSongs(), // Datos iniciales inmediatos
+        builder: (context, snapshot) {
+          final songs = snapshot.data ?? musicService.getCurrentSongs();
+          
+          print('🎵 MusicPage - Canciones mostradas: ${songs.length}');
+          
+          if (songs.isEmpty) {
+            return const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.music_off, size: 64, color: Colors.grey),
+                  SizedBox(height: 16),
+                  Text(
+                    'No hay canciones',
+                    style: TextStyle(color: Colors.grey, fontSize: 18),
                   ),
-                  title: Text(
-                    songName,
-                    style: TextStyle(
-                      color: isCurrent ? Colors.green : Colors.white,
-                      fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
-                    ),
+                  SizedBox(height: 8),
+                  Text(
+                    'Ve a la pestaña "Descargas" para\nagregar música desde YouTube',
+                    style: TextStyle(color: Colors.grey),
+                    textAlign: TextAlign.center,
                   ),
-                  subtitle: Text(
-                    '${(song.lengthSync() / (1024 * 1024)).toStringAsFixed(1)} MB',
-                    style: const TextStyle(color: Colors.grey, fontSize: 12),
-                  ),
-                  onTap: () {
-                    print('🎵 Tocando canción: $songName');
-                    print('🎵 Archivo existe: ${song.existsSync()}');
-                    musicService.playSong(song);
-                  },
-                  trailing: IconButton(
-                    icon: const Icon(Icons.delete, color: Colors.red),
-                    onPressed: () => _showDeleteDialog(context, song),
-                  ),
-                );
-              },
+                ],
+              ),
             );
-          },
-        );
-      },
+          }
+
+          return ListView.builder(
+            itemCount: songs.length,
+            itemBuilder: (context, index) {
+              final song = songs[index];
+              return StreamBuilder<File?>(
+                stream: musicService.currentSongStream,
+                initialData: musicService.getCurrentSong(), // Datos iniciales inmediatos
+                builder: (context, currentSnapshot) {
+                  final currentSong = currentSnapshot.data ?? musicService.getCurrentSong();
+                  final isCurrent = currentSong?.path == song.path;
+                  final songName = musicService.getSongName(song);
+
+                  return ListTile(
+                    tileColor: isCurrent ? Colors.green.withOpacity(0.1) : null,
+                    leading: Icon(
+                      isCurrent ? Icons.volume_up : Icons.music_note,
+                      color: isCurrent ? Colors.green : Colors.white,
+                    ),
+                    title: Text(
+                      songName,
+                      style: TextStyle(
+                        color: isCurrent ? Colors.green : Colors.white,
+                        fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                      ),
+                    ),
+                    subtitle: Text(
+                      '${(song.lengthSync() / (1024 * 1024)).toStringAsFixed(1)} MB',
+                      style: const TextStyle(color: Colors.grey, fontSize: 12),
+                    ),
+                    onTap: () {
+                      print('🎵 Tocando canción desde lista: $songName');
+                      musicService.playSong(song);
+                    },
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.red),
+                      onPressed: () => _showDeleteDialog(context, song),
+                    ),
+                  );
+                },
+              );
+            },
+          );
+        },
+      ),
     );
   }
 
@@ -1186,7 +1027,6 @@ class SongsList extends StatelessWidget {
   }
 }
 
-// Reproductor completo con inicialización mejorada
 class FullPlayerPage extends StatefulWidget {
   final MusicService musicService;
 
@@ -1197,19 +1037,19 @@ class FullPlayerPage extends StatefulWidget {
 }
 
 class _FullPlayerPageState extends State<FullPlayerPage> {
-  File? _initialSong;
-
   @override
   void initState() {
     super.initState();
-    // Capturar la canción actual al inicializar
-    _initialSong = widget.musicService.currentSong;
-    print('🎵 FullPlayer inicializado con canción: ${_initialSong?.path}');
+    // Verificar que hay una canción al inicializar
+    final currentSong = widget.musicService.getCurrentSong();
+    print('🎵 FullPlayer iniciado - Canción actual: ${currentSong?.path}');
     
-    // Si no hay canción inicial, cerrar la pantalla
-    if (_initialSong == null) {
+    if (currentSong == null) {
+      // Si no hay canción, cerrar después de mostrar el frame
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        Navigator.pop(context);
+        if (mounted) {
+          Navigator.pop(context);
+        }
       });
     }
   }
@@ -1230,15 +1070,16 @@ class _FullPlayerPageState extends State<FullPlayerPage> {
       ),
       body: StreamBuilder<File?>(
         stream: widget.musicService.currentSongStream,
-        initialData: _initialSong, // Usar la canción inicial como dato inicial
+        initialData: widget.musicService.getCurrentSong(), // ¡CLAVE! Datos inmediatos
         builder: (context, snapshot) {
-          final currentSong = snapshot.data ?? _initialSong; // Fallback a la canción inicial
-          print('🎵 FullPlayer - Current song: ${currentSong?.path}');
-          print('🎵 FullPlayer - Initial song: ${_initialSong?.path}');
-          print('🎵 FullPlayer - Snapshot connectionState: ${snapshot.connectionState}');
-          print('🎵 FullPlayer - Snapshot hasData: ${snapshot.hasData}');
+          final currentSong = snapshot.data ?? widget.musicService.getCurrentSong();
+          
+          print('🎵 FullPlayer StreamBuilder - Canción: ${currentSong?.path}');
+          print('🎵 FullPlayer - snapshot.hasData: ${snapshot.hasData}');
+          print('🎵 FullPlayer - connectionState: ${snapshot.connectionState}');
           
           if (currentSong == null) {
+            print('⚠️ FullPlayer - No hay canción actual');
             return Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -1248,11 +1089,6 @@ class _FullPlayerPageState extends State<FullPlayerPage> {
                   const Text(
                     'No hay canción seleccionada',
                     style: TextStyle(color: Colors.grey, fontSize: 18),
-                  ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Selecciona una canción para reproducir',
-                    style: TextStyle(color: Colors.grey),
                   ),
                   const SizedBox(height: 20),
                   ElevatedButton(
@@ -1264,6 +1100,8 @@ class _FullPlayerPageState extends State<FullPlayerPage> {
               ),
             );
           }
+
+          print('✅ FullPlayer - Mostrando reproductor para: ${widget.musicService.getSongName(currentSong)}');
 
           return Padding(
             padding: const EdgeInsets.all(24.0),
@@ -1469,7 +1307,6 @@ class _FullPlayerPageState extends State<FullPlayerPage> {
   }
 }
 
-// Página TTS optimizada
 class TtsPage extends StatefulWidget {
   const TtsPage({Key? key}) : super(key: key);
 
